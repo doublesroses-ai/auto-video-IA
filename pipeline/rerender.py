@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import load_config, OUTPUT_DIR, WORK_DIR, INPUT_DIR
 from .ffmpeg_utils import duration_of, video_size
+from .highlights import pick_highlights
 from .silence import cut_silences
 from .subtitles import build_ass
 from .render import render_vertical, render_horizontal, pick_music
@@ -76,6 +77,62 @@ def _ensure_tight(project: str, meta: dict, cfg: dict) -> Path:
         import shutil
         shutil.copy2(source, tight)
     return tight
+
+
+def repick_and_render(project: str) -> Path:
+    """Заново выбирает моменты по готовой расшифровке и перерендеривает шортсы."""
+    import json as _json
+    cfg = load_config()
+    out_dir = OUTPUT_DIR / project
+    transcript = _json.loads((out_dir / "transcript.json").read_text(encoding="utf-8"))
+    meta = _json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+
+    tight = _ensure_tight(project, meta, cfg)
+    total = duration_of(str(tight))
+    sh = cfg["shorts"]
+    clips = pick_highlights(transcript, total, sh["count"],
+                            sh["min_sec"], sh["max_sec"], sh["min_gap_sec"])
+    clips = [c for c in clips if c["end"] - c["start"] >= 5]
+    _log(f"Выбрано клипов: {len(clips)}")
+
+    # старые шортсы убираем, чтобы не осталось лишних файлов
+    shorts_dir = out_dir / "shorts"
+    for old in shorts_dir.glob("short_*.mp4"):
+        old.unlink(missing_ok=True)
+
+    work = WORK_DIR / project
+    work.mkdir(parents=True, exist_ok=True)
+    subs = cfg["subtitles"]
+    vert = cfg["vertical"]
+    music_cfg = cfg["music"]
+    new_meta = []
+    for i, clip in enumerate(clips, 1):
+        ass_text = build_ass(
+            transcript, clip["start"], clip["end"],
+            vert["width"], vert["height"],
+            subs["font"], subs["vertical_font_size"],
+            subs["uppercase"], subs["max_words_per_card"],
+            bottom_margin_ratio=0.30,
+        )
+        ass_file = work / f"short_{i:02d}.ass"
+        ass_file.write_text(ass_text, encoding="utf-8")
+        music = pick_music() if music_cfg["enabled"] else None
+        dst = shorts_dir / f"short_{i:02d}.mp4"
+        render_vertical(str(tight), clip["start"], clip["end"], str(ass_file),
+                        str(dst), vert["width"], vert["height"], vert["background"],
+                        music, music_cfg["volume"])
+        _log(f"Готов {dst.name} ({clip['end'] - clip['start']:.0f} с)")
+        new_meta.append({
+            "file": f"shorts/{dst.name}",
+            "start_sec": clip["start"], "end_sec": clip["end"],
+            "hook": clip["hook"], "score": clip["score"],
+        })
+
+    meta["shorts"] = new_meta
+    (out_dir / "metadata.json").write_text(
+        _json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    _log(f"=== Переотбор завершён → {out_dir} ===")
+    return out_dir
 
 
 def apply_corrections(project: str, new_texts: list[str]) -> Path:

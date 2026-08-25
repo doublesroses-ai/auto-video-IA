@@ -33,13 +33,16 @@ def _split_sentences(segments: list[dict]) -> list[dict]:
     start = None
     prev_end = None
 
-    def flush(end_time):
+    def flush(end_time, strong):
         nonlocal current_words, current_text, start
         text = " ".join(current_text).strip()
         if text and start is not None:
             sentences.append({
                 "start": start, "end": end_time, "text": text,
                 "n_words": len(current_words) or len(text.split()),
+                # strong: конец подтверждён знаком препинания или большой паузой,
+                # то есть фраза действительно закончена по смыслу
+                "strong": strong,
             })
         current_words, current_text, start = [], [], None
 
@@ -47,16 +50,18 @@ def _split_sentences(segments: list[dict]) -> list[dict]:
         # длинная пауза между сегментами — граница мысли
         if start is not None and prev_end is not None and \
                 seg["start"] - prev_end > MAX_GAP_SEC:
-            flush(prev_end)
+            flush(prev_end, strong=True)
         if start is None:
             start = seg["start"]
         current_text.append(seg["text"])
         current_words.extend(seg.get("words", []))
         prev_end = seg["end"]
-        if _SENTENCE_END.search(seg["text"]) or seg["end"] - start > MAX_SENTENCE_SEC:
-            flush(seg["end"])
+        if _SENTENCE_END.search(seg["text"]):
+            flush(seg["end"], strong=True)
+        elif seg["end"] - start > MAX_SENTENCE_SEC:
+            flush(seg["end"], strong=False)
     if current_text and segments:
-        flush(segments[-1]["end"])
+        flush(segments[-1]["end"], strong=True)
     return sentences
 
 
@@ -96,25 +101,39 @@ def pick_highlights(transcript: dict, total_duration: float, count: int,
 
     scores = [_score_sentence(s) for s in sentences]
 
-    # окна из подряд идущих предложений длиной min..max секунд
+    # Окна из ЦЕЛЫХ фраз: конец клипа — только граница фразы, приоритет у
+    # законченных по смыслу (пунктуация или большая пауза). Посреди фразы
+    # клип не обрывается никогда.
     windows = []
     for i in range(len(sentences)):
+        start = sentences[i]["start"]
+        best_j, best_strong = None, False
         j = i
-        while j < len(sentences) and sentences[j]["end"] - sentences[i]["start"] < max_sec:
+        while j < len(sentences) and sentences[j]["end"] - start <= max_sec:
+            if sentences[j]["end"] - start >= min_sec:
+                if sentences[j]["strong"]:
+                    best_j, best_strong = j, True  # самая длинная законченная фраза
+                elif not best_strong:
+                    best_j = j
             j += 1
-        j = max(j, i + 1)
-        end = min(sentences[j - 1]["end"], sentences[i]["start"] + max_sec)
-        dur = end - sentences[i]["start"]
-        if dur < min_sec:
-            end = min(sentences[i]["start"] + min_sec, total_duration)
-            dur = end - sentences[i]["start"]
-        if dur < min_sec * 0.6:
-            continue
-        window_score = sum(scores[i:j]) / max(dur / 30.0, 1.0)
+        if best_j is None:
+            # в диапазон [min, max] не попала ни одна граница фразы:
+            # разрешаем чуть выйти за max, лишь бы закончить фразу
+            if j < len(sentences) and sentences[j]["end"] - start <= max_sec * 1.2:
+                best_j, best_strong = j, sentences[j]["strong"]
+            elif j - 1 > i or (j - 1 == i and sentences[i]["end"] - start >= min_sec * 0.6):
+                best_j, best_strong = j - 1, sentences[j - 1]["strong"]
+            else:
+                continue
+        end = sentences[best_j]["end"]
+        dur = end - start
+        window_score = sum(scores[i:best_j + 1]) / max(dur / 30.0, 1.0)
         window_score += _score_sentence(sentences[i]) * 0.5  # сильное первое предложение
+        if best_strong:
+            window_score += 2.0  # финал закончен по смыслу
         windows.append({
-            "start": round(max(sentences[i]["start"] - 0.2, 0.0), 2),
-            "end": round(end + 0.2, 2),
+            "start": round(max(start - 0.2, 0.0), 2),
+            "end": round(min(end + 0.35, total_duration), 2),
             "hook": sentences[i]["text"][:120],
             "score": round(window_score, 2),
         })
