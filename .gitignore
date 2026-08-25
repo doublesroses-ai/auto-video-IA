@@ -1,0 +1,15 @@
+# Виртуальное окружение и кэши Python
+.venv/
+__pycache__/
+*.pyc
+
+# Рабочие папки с видео (большие файлы — не для git)
+input/
+output/
+work/
+logs/
+music/
+backgrounds/
+
+# Служебные файлы
+watcher.lock
