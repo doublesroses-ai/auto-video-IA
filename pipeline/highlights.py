@@ -17,12 +17,21 @@ _HOOKS = [
 _SENTENCE_END = re.compile(r"[.!?…]+[\"»')]*\s*$")
 
 
+MAX_SENTENCE_SEC = 15.0
+MAX_GAP_SEC = 1.0
+
+
 def _split_sentences(segments: list[dict]) -> list[dict]:
-    """Склеивает сегменты Whisper в предложения по знакам конца предложения."""
+    """Склеивает сегменты Whisper в предложения.
+
+    Разбивает по знакам конца предложения, а если их нет (частая история
+    с разговорной речью) — принудительно по паузам и длительности.
+    """
     sentences = []
     current_words: list[dict] = []
     current_text: list[str] = []
     start = None
+    prev_end = None
 
     def flush(end_time):
         nonlocal current_words, current_text, start
@@ -35,11 +44,16 @@ def _split_sentences(segments: list[dict]) -> list[dict]:
         current_words, current_text, start = [], [], None
 
     for seg in segments:
+        # длинная пауза между сегментами — граница мысли
+        if start is not None and prev_end is not None and \
+                seg["start"] - prev_end > MAX_GAP_SEC:
+            flush(prev_end)
         if start is None:
             start = seg["start"]
         current_text.append(seg["text"])
         current_words.extend(seg.get("words", []))
-        if _SENTENCE_END.search(seg["text"]):
+        prev_end = seg["end"]
+        if _SENTENCE_END.search(seg["text"]) or seg["end"] - start > MAX_SENTENCE_SEC:
             flush(seg["end"])
     if current_text and segments:
         flush(segments[-1]["end"])
