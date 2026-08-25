@@ -5,8 +5,9 @@ from pathlib import Path
 
 from .config import load_config, OUTPUT_DIR, WORK_DIR, INPUT_DIR
 from .ffmpeg_utils import duration_of, video_size
-from .highlights import pick_highlights
+from .punctuate import restore_punctuation
 from .silence import cut_silences
+from .smart_highlights import pick_highlights_smart
 from .subtitles import build_ass
 from .render import render_vertical, render_horizontal, pick_music
 
@@ -89,11 +90,18 @@ def repick_and_render(project: str) -> Path:
 
     tight = _ensure_tight(project, meta, cfg)
     total = duration_of(str(tight))
+
+    if cfg["punctuation"]["enabled"] and restore_punctuation(transcript):
+        (out_dir / "transcript.json").write_text(
+            _json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8")
+
     sh = cfg["shorts"]
-    clips = pick_highlights(transcript, total, sh["count"],
-                            sh["min_sec"], sh["max_sec"], sh["min_gap_sec"])
+    clips, engine = pick_highlights_smart(
+        transcript, total, sh["count"], sh["min_sec"], sh["max_sec"],
+        sh["min_gap_sec"], cfg["highlights"]["ollama_model"])
     clips = [c for c in clips if c["end"] - c["start"] >= 5]
-    _log(f"Выбрано клипов: {len(clips)}")
+    _log(f"Выбрано клипов: {len(clips)} "
+         f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")
 
     # старые шортсы убираем, чтобы не осталось лишних файлов
     shorts_dir = out_dir / "shorts"

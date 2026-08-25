@@ -52,6 +52,23 @@ if ($gpu) {
     Write-Host "Видеокарты NVIDIA нет — будет работать на процессоре (медленнее, но работает)" -ForegroundColor Yellow
 }
 
+# 4б. Ollama — умный отбор моментов локальной нейросетью (по желанию)
+$ollamaInstalled = $false
+try { Get-Command ollama -ErrorAction Stop | Out-Null; $ollamaInstalled = $true } catch {}
+if (-not $ollamaInstalled) {
+    $ans = Read-Host "Установить Ollama для умного отбора моментов нейросетью? Скачается ~6 ГБ (y/n)"
+    if ($ans -eq "y") {
+        winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        ollama pull qwen3:8b
+    } else {
+        Write-Host "Ок, без Ollama — отбор моментов будет по встроенным правилам" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "Ollama уже есть — проверяю модель..." -ForegroundColor Green
+    ollama pull qwen3:8b
+}
+
 # 5. Папки
 foreach ($d in @("input", "output", "music", "backgrounds", "work", "logs")) {
     New-Item -ItemType Directory -Force $d | Out-Null

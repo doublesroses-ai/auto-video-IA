@@ -42,6 +42,12 @@ DEFAULTS = {
         "voice": "ru-RU-SvetlanaNeural",
         "rate": "+0%",
     },
+    "punctuation": {
+        "enabled": True,
+    },
+    "highlights": {
+        "ollama_model": "qwen3:8b",
+    },
 }
 
 
