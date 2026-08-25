@@ -11,7 +11,7 @@ VOICES = {
 async def _synth_async(text: str, voice: str, rate: str, out_mp3: str) -> list[dict]:
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    communicate = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary")
     words = []
     with open(out_mp3, "wb") as f:
         async for chunk in communicate.stream():
