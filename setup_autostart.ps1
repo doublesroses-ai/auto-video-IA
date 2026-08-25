@@ -1,4 +1,4 @@
-# Регистрирует автозапуск наблюдателя при входе в Windows.
+﻿# Регистрирует автозапуск наблюдателя при входе в Windows.
 # Удалить автозапуск: schtasks /Delete /TN "AutoVideoIA Watcher" /F
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $vbs = Join-Path $projectDir "run_watcher_hidden.vbs"

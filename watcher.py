@@ -3,6 +3,7 @@
 Запуск:  python watcher.py
 Готовые результаты появляются в output/, исходники переезжают в input/done/.
 """
+import subprocess
 import sys
 import time
 import traceback
@@ -65,6 +66,29 @@ def is_stable(path: Path, wait: float = 4.0) -> bool:
     return size1 == size2 and size1 > 0
 
 
+def integrity_ok(path: Path) -> bool:
+    """Начало и конец видео декодируются без ошибок.
+
+    Загрузки (например, из Telegram) идут рывками: размер может «замереть»,
+    хотя файл ещё не докачан. Битый хвост ловим быстрым пробным декодированием.
+    """
+    if path.suffix.lower() in TEXT_EXTENSIONS:
+        return True
+    from pipeline.ffmpeg_utils import ffmpeg
+    for args in (["-t", "5", "-i", str(path)], ["-sseof", "-5", "-i", str(path)]):
+        try:
+            proc = subprocess.run(
+                [ffmpeg(), "-v", "error", *args, "-f", "null", "-"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        if proc.returncode != 0 or (proc.stderr or "").strip():
+            return False
+    return True
+
+
 def _pid_alive(pid: int) -> bool:
     import ctypes
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -109,6 +133,8 @@ def main() -> int:
     handled = VIDEO_EXTENSIONS | TEXT_EXTENSIONS
     log(f"Наблюдаю за папкой {INPUT_DIR} (проверка каждые {POLL_SEC} с). Ctrl+C — выход.")
     log("Видеофайлы нарезаются на шортсы, .txt озвучиваются нейроголосом.")
+    MAX_WAIT_POLLS = 40  # ~10 минут ожидания докачки, потом файл считается битым
+    waiting: dict[str, int] = {}
     try:
         while True:
             files = sorted(
@@ -119,6 +145,18 @@ def main() -> int:
                 if not is_stable(item):
                     log(f"{item.name}: файл ещё копируется, жду...")
                     continue
+                if not integrity_ok(item):
+                    waiting[item.name] = waiting.get(item.name, 0) + 1
+                    if waiting[item.name] >= MAX_WAIT_POLLS:
+                        log(f"{item.name}: файл так и не стал читаться — похоже, "
+                            "он повреждён или загрузка оборвалась. Переношу в failed. "
+                            "Скачай/скопируй файл заново и положи в input ещё раз.")
+                        item.replace(failed_dir / item.name)
+                        waiting.pop(item.name, None)
+                    elif waiting[item.name] % 4 == 1:
+                        log(f"{item.name}: файл ещё не докачан (или повреждён), жду...")
+                    continue
+                waiting.pop(item.name, None)
                 log(f"Новый файл: {item.name} — начинаю обработку")
                 try:
                     if item.suffix.lower() in TEXT_EXTENSIONS:
