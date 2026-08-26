@@ -1,5 +1,6 @@
 """Загрузка конфигурации проекта из config.json."""
 import json
+import shutil
 
 from .paths import APP_DIR, user_dir, cache_dir
 
@@ -85,10 +86,30 @@ LOGS_DIR = cache_dir() / "logs"
 LOCK_FILE = cache_dir() / "watcher.lock"
 
 def ensure_dirs() -> None:
-    """Создаёт все рабочие папки. Безопасно вызывать многократно."""
+    """Создаёт все рабочие папки и файл настроек. Безопасно вызывать многократно."""
     for d in (INPUT_DIR, INPUT_DIR / "done", INPUT_DIR / "failed",
               OUTPUT_DIR, MUSIC_DIR, BACKGROUNDS_DIR, WORK_DIR, LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    _seed_config()
+
+
+def _seed_config() -> None:
+    """Кладёт образец настроек туда, где программа их ищет.
+
+    Установщик копирует config.json рядом с программой, а читается он из папки
+    пользователя — без этого переноса настройки менять было бы негде.
+    """
+    if CONFIG_PATH.exists():
+        return
+    sample = APP_DIR / "config.json"
+    try:
+        if sample.exists() and sample.resolve() != CONFIG_PATH.resolve():
+            shutil.copy2(sample, CONFIG_PATH)
+        elif not sample.exists():
+            CONFIG_PATH.write_text(
+                json.dumps(DEFAULTS, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass  # без файла программа работает на значениях по умолчанию
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts", ".wmv"}

@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "doublesroses-ai/auto-video-IA"
 API = "https://api.github.com"
+NL = chr(10)
 UPLOADS = "https://uploads.github.com"
 
 
@@ -58,37 +59,35 @@ def api(token: str, method: str, url: str, payload=None,
         return json.loads(raw) if raw else {}
 
 
-NOTES = """Первая версия приложения для Windows.
+def release_notes(version: str) -> str:
+    """Берёт раздел этой версии из CHANGELOG.md и дополняет инструкцией."""
+    body = ""
+    changelog = ROOT / "CHANGELOG.md"
+    if changelog.exists():
+        collecting = False
+        chunk = []
+        for line in changelog.read_text(encoding="utf-8").splitlines():
+            if line.startswith("## "):
+                if collecting:
+                    break
+                collecting = line.startswith(f"## {version}")
+                continue
+            if collecting:
+                chunk.append(line)
+        body = NL.join(chunk).strip()
 
-**Установка:** скачать `AutoVideoIA-Setup-1.0.0.exe`, запустить, при окне
-«Windows защитила ваш компьютер» нажать «Подробнее» → «Выполнить в любом случае».
-Python, ffmpeg и git ставить не нужно — всё внутри. Права администратора не требуются.
+    install = (
+        "## Установка" + NL * 2
+        + "Скачать `AutoVideoIA-Setup-" + version + ".exe`, запустить, при окне "
+        + "«Windows защитила ваш компьютер» нажать «Подробнее» -> «Выполнить в любом "
+        + "случае». Python, ffmpeg и git ставить не нужно." + NL * 2
+        + "Установленные копии предыдущей версии предложат обновиться сами "
+        + "при следующем запуске." + NL * 2
+        + "Требуется Windows 10/11 64-бит. Видеокарта NVIDIA ускоряет распознавание "
+        + "речи, но не обязательна."
+    )
+    return (body + NL * 2 + install) if body else install
 
-После установки откроется окно первой настройки: оно докачает модель распознавания
-речи и, по желанию, нейросеть для заголовков. Нужен интернет; любой шаг можно пропустить.
-
-**Что умеет**
-
-- Длинное видео (стрим, подкаст, летсплей) → вертикальные шортсы 9:16 с субтитрами
-  в стиле караоке, вырезанными паузами и фоновой музыкой.
-- Полная версия 16:9 с вшитыми субтитрами для YouTube.
-- Текстовый файл → видео с озвучкой нейроголосом.
-- Правка ошибок распознавания с пересборкой роликов.
-- Автоматический режим: файлы из папки `input` обрабатываются сами.
-
-**Где что лежит**
-
-| Что | Где |
-|---|---|
-| Программа | `%LOCALAPPDATA%\\Programs\\AutoVideoIA` |
-| Видео (`input`, `output`, `music`, `backgrounds`) | `Видео\\AutoVideoIA` |
-| Служебное (`work`, `logs`) | `%LOCALAPPDATA%\\AutoVideoIA` |
-
-Видео лежат отдельно от программы и переживают её переустановку и удаление.
-
-**Требования:** Windows 10/11 64-бит. Видеокарта NVIDIA ускоряет распознавание речи
-в десятки раз, но не обязательна — без неё всё считается на процессоре, просто дольше.
-"""
 
 
 def main() -> int:
@@ -117,7 +116,7 @@ def main() -> int:
         "tag_name": tag,
         "target_commitish": "main",
         "name": f"Автомонтаж видео {version}",
-        "body": NOTES,
+        "body": release_notes(version),
         "draft": False,
         "prerelease": False,
     })

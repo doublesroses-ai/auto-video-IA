@@ -32,7 +32,7 @@ VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 APP_FILES = ["app.pyw", "watcher.py", "make_shorts.py", "first_run.py", "updater.py",
-             "requirements-punctuation.txt", "config.json", "README.md", "Автомонтаж видео.bat", "start_watcher.bat",
+             "requirements-punctuation.txt", "config.json", "README.md", "CHANGELOG.md", "Автомонтаж видео.bat", "start_watcher.bat",
              "run_watcher_hidden.vbs", "requirements.txt", "requirements-gpu.txt"]
 APP_DIRS = ["pipeline"]
 
