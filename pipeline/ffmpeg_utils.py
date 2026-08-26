@@ -19,6 +19,10 @@ def _winget_links_candidate(name: str) -> str | None:
 
 @functools.cache
 def find_tool(name: str) -> str:
+    from .paths import bundled_bin
+    bundled = bundled_bin() / f"{name}.exe"
+    if bundled.is_file():
+        return str(bundled)
     path = shutil.which(name) or _winget_links_candidate(name)
     if not path:
         raise RuntimeError(

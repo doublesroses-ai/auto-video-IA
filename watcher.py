@@ -10,13 +10,13 @@ import traceback
 from pathlib import Path
 
 from pipeline.config import (
-    load_config, INPUT_DIR, LOGS_DIR, VIDEO_EXTENSIONS, TEXT_EXTENSIONS, PROJECT_DIR,
+    load_config, ensure_dirs, INPUT_DIR, LOGS_DIR, LOCK_FILE,
+    VIDEO_EXTENSIONS, TEXT_EXTENSIONS,
 )
 from pipeline.process import process_video
 from pipeline.text_video import text_file_to_video
 
 POLL_SEC = 15
-LOCK_FILE = PROJECT_DIR / "watcher.lock"
 
 
 class _Tee:
@@ -42,7 +42,8 @@ class _Tee:
 
 
 def _install_tee() -> None:
-    LOGS_DIR.mkdir(exist_ok=True)
+    ensure_dirs()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logfile = open(LOGS_DIR / "watcher.log", "a", encoding="utf-8", buffering=1)
     streams = [logfile]
     if sys.stdout is not None:
@@ -127,8 +128,6 @@ def main() -> int:
 
     done_dir = INPUT_DIR / "done"
     failed_dir = INPUT_DIR / "failed"
-    for d in (INPUT_DIR, done_dir, failed_dir):
-        d.mkdir(parents=True, exist_ok=True)
 
     handled = VIDEO_EXTENSIONS | TEXT_EXTENSIONS
     log(f"Наблюдаю за папкой {INPUT_DIR} (проверка каждые {POLL_SEC} с). Ctrl+C — выход.")

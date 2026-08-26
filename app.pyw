@@ -11,12 +11,13 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from pipeline.config import load_config, INPUT_DIR, OUTPUT_DIR, LOGS_DIR, WORK_DIR  # noqa: E402
+from pipeline.config import (  # noqa: E402
+    load_config, ensure_dirs, INPUT_DIR, OUTPUT_DIR, LOGS_DIR, LOCK_FILE,
+)
+from pipeline.paths import python_exe  # noqa: E402
 from pipeline.tts import VOICES  # noqa: E402
 
-PYTHON = PROJECT_DIR / ".venv" / "Scripts" / "python.exe"
 LOG_FILE = LOGS_DIR / "watcher.log"
-LOCK_FILE = PROJECT_DIR / "watcher.lock"
 
 
 class LogWriter:
@@ -24,7 +25,7 @@ class LogWriter:
 
     def write(self, s):
         if s.strip():
-            LOGS_DIR.mkdir(exist_ok=True)
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(s if s.endswith("\n") else s + "\n")
 
@@ -51,6 +52,7 @@ class App(tk.Tk):
         self.minsize(640, 520)
         self.busy = False
         self._log_size = -1
+        ensure_dirs()
         sys.stdout = sys.stderr = LogWriter()
 
         pad = {"padx": 10, "pady": 6}
@@ -124,6 +126,39 @@ class App(tk.Tk):
 
         self.refresh_projects()
         self.after(300, self._tick)
+        threading.Thread(target=self._check_update, daemon=True).start()
+
+    # ---------- обновления ----------
+
+    def _check_update(self):
+        """Тихо спрашивает GitHub о новой версии. Нет интернета — молчим."""
+        try:
+            import updater
+        except ImportError:
+            return
+        info = updater.check()
+        if info:
+            self.after(0, lambda: self._offer_update(updater, info))
+
+    def _offer_update(self, updater, info):
+        if not messagebox.askyesno("Есть обновление",
+                                   updater.describe(info) + "\n\nУстановить сейчас?"):
+            return
+        self.status_label.config(text="Качаю обновление...")
+        self.progress.pack(fill="x", padx=12, pady=2, before=self.status_label)
+        self.progress.config(mode="determinate", maximum=100, value=0)
+
+        def work():
+            try:
+                path = updater.download(
+                    info, progress=lambda d, t: self.after(
+                        0, lambda: self.progress.config(value=100 * d / t)))
+                self.after(0, lambda: updater.install(path))
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("Обновление", str(exc)))
+                self.after(0, lambda: self.progress.pack_forget())
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- фоновые задачи ----------
 
@@ -176,7 +211,8 @@ class App(tk.Tk):
             LOCK_FILE.unlink(missing_ok=True)
             print("Наблюдатель остановлен из приложения.")
         else:
-            subprocess.Popen([str(PYTHON), "watcher.py"], cwd=str(PROJECT_DIR),
+            subprocess.Popen([python_exe(), str(PROJECT_DIR / "watcher.py")],
+                             cwd=str(PROJECT_DIR),
                              creationflags=subprocess.CREATE_NO_WINDOW)
             print("Наблюдатель запущен из приложения.")
 

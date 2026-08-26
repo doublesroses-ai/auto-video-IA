@@ -13,3 +13,9 @@ backgrounds/
 
 # Служебные файлы
 watcher.lock
+
+# Сборка дистрибутива (сотни мегабайт, собирается заново скриптом)
+build/dist/
+build/cache/
+installer/output/
+first_run_done.marker

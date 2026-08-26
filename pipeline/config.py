@@ -1,9 +1,10 @@
 """Загрузка конфигурации проекта из config.json."""
 import json
-from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_DIR / "config.json"
+from .paths import APP_DIR, user_dir, cache_dir
+
+PROJECT_DIR = APP_DIR  # оставлено для совместимости со старым кодом
+CONFIG_PATH = user_dir() / "config.json"
 
 DEFAULTS = {
     "language": "auto",
@@ -75,11 +76,20 @@ def load_config() -> dict:
     return cfg
 
 
-INPUT_DIR = PROJECT_DIR / "input"
-OUTPUT_DIR = PROJECT_DIR / "output"
-MUSIC_DIR = PROJECT_DIR / "music"
-WORK_DIR = PROJECT_DIR / "work"
-LOGS_DIR = PROJECT_DIR / "logs"
+INPUT_DIR = user_dir() / "input"
+OUTPUT_DIR = user_dir() / "output"
+MUSIC_DIR = user_dir() / "music"
+BACKGROUNDS_DIR = user_dir() / "backgrounds"
+WORK_DIR = cache_dir() / "work"
+LOGS_DIR = cache_dir() / "logs"
+LOCK_FILE = cache_dir() / "watcher.lock"
+
+def ensure_dirs() -> None:
+    """Создаёт все рабочие папки. Безопасно вызывать многократно."""
+    for d in (INPUT_DIR, INPUT_DIR / "done", INPUT_DIR / "failed",
+              OUTPUT_DIR, MUSIC_DIR, BACKGROUNDS_DIR, WORK_DIR, LOGS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts", ".wmv"}
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"}

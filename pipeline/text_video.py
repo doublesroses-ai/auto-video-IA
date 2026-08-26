@@ -4,13 +4,14 @@ import random
 import time
 from pathlib import Path
 
-from .config import load_config, OUTPUT_DIR, WORK_DIR, PROJECT_DIR, VIDEO_EXTENSIONS
+from .config import (
+    load_config, OUTPUT_DIR, WORK_DIR, BACKGROUNDS_DIR, VIDEO_EXTENSIONS,
+)
 from .ffmpeg_utils import ffmpeg, run, duration_of, filter_path, video_encoder_args
 from .render import pick_music
 from .subtitles import build_ass
 from .tts import synthesize
 
-BACKGROUNDS_DIR = PROJECT_DIR / "backgrounds"
 
 
 def _log(msg: str) -> None:

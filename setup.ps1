@@ -42,6 +42,7 @@ if (-not (Test-Path ".venv")) {
 Write-Host "Ставлю библиотеки (faster-whisper, edge-tts)..." -ForegroundColor Yellow
 & ".venv\Scripts\python.exe" -m pip install --upgrade pip -q
 & ".venv\Scripts\pip.exe" install -r requirements.txt -q
+& ".venv\Scripts\pip.exe" install -r requirements-punctuation.txt -q
 
 # 4. Библиотеки CUDA — только если есть видеокарта NVIDIA
 $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "NVIDIA" }
