@@ -122,10 +122,27 @@ def main() -> int:
     })
 
     size_mb = asset.stat().st_size / 1024 / 1024
-    log(f"Загружаю {asset.name} ({size_mb:.0f} МБ)...")
     upload_url = f"{UPLOADS}/repos/{REPO}/releases/{release['id']}/assets?name={asset.name}"
     ctype = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
-    uploaded = api(token, "POST", upload_url, data=asset.read_bytes(), content_type=ctype)
+    payload_bytes = asset.read_bytes()
+
+    # Полтораста мегабайт по нестабильному каналу с первого раза уходят не всегда,
+    # поэтому пробуем несколько раз, убирая недогруженный файл перед повтором.
+    uploaded = None
+    for attempt in range(1, 4):
+        log(f"Загружаю {asset.name} ({size_mb:.0f} МБ), попытка {attempt} из 3...")
+        try:
+            uploaded = api(token, "POST", upload_url,
+                           data=payload_bytes, content_type=ctype)
+            break
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            log(f"  не вышло: {type(exc).__name__}")
+            if attempt == 3:
+                raise
+            for old_asset in api(token, "GET",
+                                 f"{API}/repos/{REPO}/releases/{release['id']}/assets"):
+                api(token, "DELETE",
+                    f"{API}/repos/{REPO}/releases/assets/{old_asset['id']}")
 
     log("")
     log("=== ГОТОВО ===")
