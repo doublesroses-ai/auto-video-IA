@@ -9,6 +9,7 @@ import time
 import traceback
 from pathlib import Path
 
+from pipeline.console import use_utf8
 from pipeline.config import (
     load_config, ensure_dirs, INPUT_DIR, LOGS_DIR, LOCK_FILE,
     VIDEO_EXTENSIONS, TEXT_EXTENSIONS,
@@ -42,6 +43,7 @@ class _Tee:
 
 
 def _install_tee() -> None:
+    use_utf8()
     ensure_dirs()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logfile = open(LOGS_DIR / "watcher.log", "a", encoding="utf-8", buffering=1)

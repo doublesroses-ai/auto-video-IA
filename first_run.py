@@ -21,10 +21,12 @@ APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 
 from pipeline import dpi  # noqa: E402
+from pipeline.console import use_utf8  # noqa: E402
 from pipeline.paths import python_exe  # noqa: E402
 from pipeline.config import ensure_dirs  # noqa: E402
 from pipeline.paths import user_dir  # noqa: E402
 
+use_utf8()
 dpi.enable()  # строго до создания окна Tk
 
 MARKER = APP_DIR / "first_run_done.marker"

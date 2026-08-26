@@ -6,11 +6,13 @@
 import argparse
 import sys
 
+from pipeline.console import use_utf8
 from pipeline.config import load_config
 from pipeline.process import process_video
 
 
 def main() -> int:
+    use_utf8()
     parser = argparse.ArgumentParser(description="Автомонтаж: длинное видео → шортсы")
     parser.add_argument("video", help="путь к исходному видео")
     parser.add_argument("--shorts", type=int, help="сколько шортсов сделать")
