@@ -41,5 +41,19 @@
   "tts": {
     "voice": "ru-RU-SvetlanaNeural",
     "rate": "+0%"
+  },
+
+  "punctuation": {
+    "enabled": true
+  },
+
+  "highlights": {
+    "ollama_model": "qwen3:8b"
+  },
+
+  "render": {
+    "shorts_max_mbps": 8,
+    "youtube_max_mbps": 12,
+    "master_max_mbps": 14
   }
 }

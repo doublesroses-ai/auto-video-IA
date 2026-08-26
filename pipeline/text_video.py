@@ -91,7 +91,7 @@ def text_to_video(text: str, name: str, config: dict | None = None) -> Path:
     cmd += [
         "-filter_complex", vchain + ";" + achain,
         "-map", "[vout]", "-map", "[aout]",
-        *video_encoder_args(),
+        *video_encoder_args(cfg["render"]["shorts_max_mbps"]),
         "-c:a", "aac", "-b:a", "192k",
         "-t", f"{dur:.3f}", "-movflags", "+faststart", str(dst),
     ]

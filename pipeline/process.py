@@ -41,7 +41,8 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
     if sil["enabled"]:
         _log("Шаг 1/5: вырезаю паузы и тишину...")
         stats = cut_silences(str(src), str(tight), work,
-                             sil["noise_db"], sil["min_silence_sec"], sil["pad_sec"])
+                             sil["noise_db"], sil["min_silence_sec"], sil["pad_sec"],
+                             cfg["render"]["master_max_mbps"])
         _log(f"  было {stats['original_sec']:.0f} с, стало {stats['kept_sec']:.0f} с "
              f"({stats['segments']} фрагментов)")
     else:
@@ -94,7 +95,7 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
         dst = shorts_dir / f"short_{i:02d}.mp4"
         render_vertical(str(tight), clip["start"], clip["end"], str(ass_file),
                         str(dst), vert["width"], vert["height"], vert["background"],
-                        music, music_cfg["volume"])
+                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"])
         _log(f"  готов {dst.name} ({clip['end'] - clip['start']:.0f} с)"
              + (f", музыка: {Path(music).name}" if music else ""))
         meta.append({
@@ -114,7 +115,8 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
         )
         ass_full = work / "full.ass"
         ass_full.write_text(ass_text, encoding="utf-8")
-        render_horizontal(str(tight), str(ass_full), str(out_dir / f"{stem}_youtube.mp4"))
+        render_horizontal(str(tight), str(ass_full), str(out_dir / f"{stem}_youtube.mp4"),
+                          cfg["render"]["youtube_max_mbps"])
         _log(f"  готов {stem}_youtube.mp4")
     else:
         _log("Шаг 5/5: версия 16:9 выключена в конфиге")

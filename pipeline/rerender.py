@@ -128,8 +128,9 @@ def repick_and_render(project: str) -> Path:
         dst = shorts_dir / f"short_{i:02d}.mp4"
         render_vertical(str(tight), clip["start"], clip["end"], str(ass_file),
                         str(dst), vert["width"], vert["height"], vert["background"],
-                        music, music_cfg["volume"])
-        _log(f"Готов {dst.name} ({clip['end'] - clip['start']:.0f} с)")
+                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"])
+        _log(f"Готов {dst.name} ({clip['end'] - clip['start']:.0f} с, "
+             f"{dst.stat().st_size / 1024 / 1024:.0f} МБ)")
         new_meta.append({
             "file": f"shorts/{dst.name}",
             "start_sec": clip["start"], "end_sec": clip["end"],
@@ -186,7 +187,8 @@ def apply_corrections(project: str, new_texts: list[str]) -> Path:
         music = pick_music() if music_cfg["enabled"] else None
         render_vertical(str(tight), clip["start_sec"], clip["end_sec"], str(ass_file),
                         str(out_dir / clip["file"]), vert["width"], vert["height"],
-                        vert["background"], music, music_cfg["volume"])
+                        vert["background"], music, music_cfg["volume"],
+                        cfg["render"]["shorts_max_mbps"])
 
     if cfg["render_youtube_version"]:
         _log("Перерендериваю полную версию 16:9...")
@@ -200,7 +202,8 @@ def apply_corrections(project: str, new_texts: list[str]) -> Path:
         ass_full = work / "full.ass"
         ass_full.write_text(ass_text, encoding="utf-8")
         render_horizontal(str(tight), str(ass_full),
-                          str(out_dir / f"{project}_youtube.mp4"))
+                          str(out_dir / f"{project}_youtube.mp4"),
+                          cfg["render"]["youtube_max_mbps"])
 
     _log(f"=== Перерендер завершён → {out_dir} ===")
     return out_dir

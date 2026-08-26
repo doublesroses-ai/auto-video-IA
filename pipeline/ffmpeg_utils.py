@@ -74,18 +74,33 @@ def has_audio(path: str) -> bool:
 
 
 @functools.cache
-def video_encoder_args() -> list[str]:
-    """NVENC, если видеокарта NVIDIA доступна, иначе libx264."""
+def _has_nvenc() -> bool:
     try:
         subprocess.run(
             [ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
              "-c:v", "h264_nvenc", "-f", "null", "-"],
             capture_output=True, check=True, timeout=30,
         )
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
-                "-rc", "vbr", "-cq", "21", "-b:v", "0"]
+        return True
     except Exception:
-        return ["-c:v", "libx264", "-preset", "fast", "-crf", "20"]
+        return False
+
+
+def video_encoder_args(max_mbps: float | None = None) -> list[str]:
+    """NVENC, если видеокарта NVIDIA доступна, иначе libx264.
+
+    max_mbps ограничивает пиковый битрейт. Без него кодировщик в режиме
+    постоянного качества раздувает вертикальные ролики до 15+ Мбит/с
+    (90 МБ за 45 секунд) — платформы всё равно пережимают их вдвое слабее.
+    """
+    if _has_nvenc():
+        args = ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+                "-rc", "vbr", "-cq", "23", "-b:v", "0"]
+    else:
+        args = ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+    if max_mbps:
+        args += ["-maxrate", f"{max_mbps:g}M", "-bufsize", f"{max_mbps * 2:g}M"]
+    return args
 
 
 def filter_path(path: str) -> str:

@@ -53,7 +53,8 @@ def keep_intervals(total: float, silences: list[tuple[float, float]],
 
 
 def cut_silences(src: str, dst: str, work_dir: Path,
-                 noise_db: float, min_silence: float, pad: float) -> dict:
+                 noise_db: float, min_silence: float, pad: float,
+                 max_mbps: float | None = 14) -> dict:
     """Вырезает паузы. Возвращает статистику. Если резать нечего — просто копирует."""
     total = duration_of(src)
     silences = detect_silences(src, noise_db, min_silence)
@@ -84,7 +85,7 @@ def cut_silences(src: str, dst: str, work_dir: Path,
         [ffmpeg(), "-y", "-i", str(src),
          "-/filter_complex", str(script_file),
          "-map", "[vout]", "-map", "[aout]",
-         *video_encoder_args(),
+         *video_encoder_args(max_mbps),
          "-c:a", "aac", "-b:a", "192k",
          "-movflags", "+faststart", str(dst)],
         desc="вырезание пауз",

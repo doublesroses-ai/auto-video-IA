@@ -27,7 +27,8 @@ def _audio_chain(has_music: bool, music_volume: float, fade_at: float | None = N
 
 def render_vertical(src: str, start: float, end: float, ass_file: str, dst: str,
                     width: int, height: int, background: str,
-                    music: str | None, music_volume: float) -> None:
+                    music: str | None, music_volume: float,
+                    max_mbps: float | None = 8) -> None:
     """Вырезает клип и рендерит вертикальный шортс с субтитрами и музыкой."""
     dur = end - start
     sub = filter_path(ass_file)
@@ -54,14 +55,15 @@ def render_vertical(src: str, start: float, end: float, ass_file: str, dst: str,
         "-filter_complex",
         vchain + ";" + _audio_chain(bool(music), music_volume, fade_at=dur - 0.55),
         "-map", "[vout]", "-map", "[aout]",
-        *video_encoder_args(),
+        *video_encoder_args(max_mbps),
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", "-movflags", "+faststart", str(dst),
     ]
     run(cmd, desc="рендер шортса")
 
 
-def render_horizontal(src: str, ass_file: str, dst: str) -> None:
+def render_horizontal(src: str, ass_file: str, dst: str,
+                      max_mbps: float | None = 12) -> None:
     """Полная 16:9 версия с вшитыми субтитрами и нормализацией звука."""
     sub = filter_path(ass_file)
     audio = ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"] if has_audio(src) else []
@@ -69,7 +71,7 @@ def render_horizontal(src: str, ass_file: str, dst: str) -> None:
         [ffmpeg(), "-y", "-i", str(src),
          "-vf", f"ass='{sub}'",
          *audio,
-         *video_encoder_args(),
+         *video_encoder_args(max_mbps),
          "-c:a", "aac", "-b:a", "192k",
          "-movflags", "+faststart", str(dst)],
         desc="рендер 16:9",

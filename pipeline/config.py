@@ -48,6 +48,12 @@ DEFAULTS = {
     "highlights": {
         "ollama_model": "qwen3:8b",
     },
+    "render": {
+        # потолок битрейта, Мбит/с: держит файлы компактными без видимой потери
+        "shorts_max_mbps": 8,
+        "youtube_max_mbps": 12,
+        "master_max_mbps": 14,
+    },
 }
 
 
