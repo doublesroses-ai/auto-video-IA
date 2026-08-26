@@ -8,8 +8,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
+
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR))
+
+from pipeline import dpi  # noqa: E402
+
+dpi.enable()  # строго до создания окна Tk, иначе Windows размоет текст
 
 from pipeline.config import (  # noqa: E402
     load_config, ensure_dirs, INPUT_DIR, OUTPUT_DIR, LOGS_DIR, LOCK_FILE,
@@ -45,29 +50,36 @@ def watcher_pid() -> int | None:
 
 
 class App(tk.Tk):
+    def px(self, value: int) -> int:
+        """Пересчёт размера из «обычного» экрана в пиксели текущего."""
+        return int(value * self.k)
+
     def __init__(self):
         super().__init__()
         self.title("Автомонтаж видео")
-        self.geometry("760x640")
-        self.minsize(640, 520)
+        # Размеры в коде рассчитаны на обычный экран; на экране с увеличенным
+        # масштабом их надо умножить, иначе окно выйдет мелким.
+        self.k = dpi.scale_of(self)
+        self.geometry(f"{self.px(760)}x{self.px(640)}")
+        self.minsize(self.px(640), self.px(520))
         self.busy = False
         self._log_size = -1
         ensure_dirs()
         sys.stdout = sys.stderr = LogWriter()
 
-        pad = {"padx": 10, "pady": 6}
+        pad = {"padx": self.px(10), "pady": self.px(6)}
 
         # --- Наблюдатель ---
         top = ttk.LabelFrame(self, text="Автоматический режим (папка input)")
         top.pack(fill="x", **pad)
         self.watcher_label = ttk.Label(top, text="...")
-        self.watcher_label.pack(side="left", padx=8, pady=8)
+        self.watcher_label.pack(side="left", padx=self.px(8), pady=self.px(8))
         ttk.Button(top, text="Открыть output", command=lambda: os.startfile(OUTPUT_DIR)
-                   ).pack(side="right", padx=4, pady=6)
+                   ).pack(side="right", padx=self.px(4), pady=self.px(6))
         ttk.Button(top, text="Открыть input", command=lambda: os.startfile(INPUT_DIR)
-                   ).pack(side="right", padx=4, pady=6)
+                   ).pack(side="right", padx=self.px(4), pady=self.px(6))
         self.watcher_btn = ttk.Button(top, text="Запустить", command=self.toggle_watcher)
-        self.watcher_btn.pack(side="right", padx=4, pady=6)
+        self.watcher_btn.pack(side="right", padx=self.px(4), pady=self.px(6))
 
         # --- Вкладки ---
         nb = ttk.Notebook(self)
@@ -77,52 +89,52 @@ class App(tk.Tk):
         nb.add(tab1, text="  Видео → шортсы  ")
         ttk.Label(tab1, text="Выбери длинное видео — получишь шортсы 9:16 и версию 16:9.\n"
                              "(То же самое происходит само с файлами из папки input.)"
-                  ).pack(anchor="w", padx=10, pady=8)
+                  ).pack(anchor="w", padx=self.px(10), pady=self.px(8))
         self.video_btn = ttk.Button(tab1, text="Выбрать видео и обработать…",
                                     command=self.pick_video)
-        self.video_btn.pack(anchor="w", padx=10, pady=(0, 10))
+        self.video_btn.pack(anchor="w", padx=self.px(10), pady=(self.px(0), self.px(10)))
 
         tab2 = ttk.Frame(nb)
         nb.add(tab2, text="  Текст → озвучка  ")
         row = ttk.Frame(tab2)
-        row.pack(fill="x", padx=10, pady=(8, 2))
+        row.pack(fill="x", padx=self.px(10), pady=(self.px(8), self.px(2)))
         ttk.Label(row, text="Голос:").pack(side="left")
         self.voice_var = tk.StringVar(value=list(VOICES)[0])
         ttk.Combobox(row, textvariable=self.voice_var, values=list(VOICES),
-                     state="readonly", width=22).pack(side="left", padx=6)
+                     state="readonly", width=22).pack(side="left", padx=self.px(6))
         ttk.Button(row, text="Загрузить из .txt…", command=self.load_txt
                    ).pack(side="right")
         self.text_box = tk.Text(tab2, height=6, wrap="word", font=("Segoe UI", 10))
-        self.text_box.pack(fill="both", expand=True, padx=10, pady=4)
+        self.text_box.pack(fill="both", expand=True, padx=self.px(10), pady=self.px(4))
         self.tts_btn = ttk.Button(tab2, text="Озвучить и собрать видео",
                                   command=self.run_tts)
-        self.tts_btn.pack(anchor="w", padx=10, pady=(2, 10))
+        self.tts_btn.pack(anchor="w", padx=self.px(10), pady=(self.px(2), self.px(10)))
 
         tab3 = ttk.Frame(nb)
         nb.add(tab3, text="  Исправить субтитры  ")
         ttk.Label(tab3, text="Выбери готовый проект, поправь ошибки распознавания —\n"
                              "и ролики перерендерятся с исправленным текстом."
-                  ).pack(anchor="w", padx=10, pady=8)
+                  ).pack(anchor="w", padx=self.px(10), pady=self.px(8))
         row3 = ttk.Frame(tab3)
-        row3.pack(fill="x", padx=10, pady=(0, 10))
+        row3.pack(fill="x", padx=self.px(10), pady=(self.px(0), self.px(10)))
         self.project_var = tk.StringVar()
         self.project_combo = ttk.Combobox(row3, textvariable=self.project_var,
                                           state="readonly", width=40)
         self.project_combo.pack(side="left")
         ttk.Button(row3, text="Обновить список", command=self.refresh_projects
-                   ).pack(side="left", padx=6)
+                   ).pack(side="left", padx=self.px(6))
         self.edit_btn = ttk.Button(row3, text="Открыть редактор…", command=self.open_editor)
-        self.edit_btn.pack(side="left", padx=6)
+        self.edit_btn.pack(side="left", padx=self.px(6))
 
         # --- Статус и лог ---
         self.progress = ttk.Progressbar(self, mode="indeterminate")
         self.status_label = ttk.Label(self, text="Готов к работе")
-        self.status_label.pack(anchor="w", padx=12)
+        self.status_label.pack(anchor="w", padx=self.px(12))
         log_frame = ttk.LabelFrame(self, text="Журнал")
         log_frame.pack(fill="both", expand=True, **pad)
         self.log_box = scrolledtext.ScrolledText(
             log_frame, height=10, state="disabled", font=("Consolas", 9))
-        self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
+        self.log_box.pack(fill="both", expand=True, padx=self.px(4), pady=self.px(4))
 
         self.refresh_projects()
         self.after(300, self._tick)
@@ -145,7 +157,7 @@ class App(tk.Tk):
                                    updater.describe(info) + "\n\nУстановить сейчас?"):
             return
         self.status_label.config(text="Качаю обновление...")
-        self.progress.pack(fill="x", padx=12, pady=2, before=self.status_label)
+        self.progress.pack(fill="x", padx=self.px(12), pady=self.px(2), before=self.status_label)
         self.progress.config(mode="determinate", maximum=100, value=0)
 
         def work():
@@ -190,7 +202,7 @@ class App(tk.Tk):
             btn.config(state=state)
         if busy:
             self.status_label.config(text="Работаю… ход обработки — в журнале ниже")
-            self.progress.pack(fill="x", padx=12, pady=2, before=self.status_label)
+            self.progress.pack(fill="x", padx=self.px(12), pady=self.px(2), before=self.status_label)
             self.progress.start(80)
         else:
             self.progress.stop()
@@ -282,9 +294,9 @@ class App(tk.Tk):
         win.title(f"Субтитры: {project}")
         win.geometry("720x480")
         ttk.Label(win, text="Одна строка — один фрагмент. Правь текст, "
-                            "но не удаляй и не добавляй строки.").pack(anchor="w", padx=10, pady=6)
+                            "но не удаляй и не добавляй строки.").pack(anchor="w", padx=self.px(10), pady=self.px(6))
         editor = scrolledtext.ScrolledText(win, wrap="word", font=("Segoe UI", 11))
-        editor.pack(fill="both", expand=True, padx=10, pady=4)
+        editor.pack(fill="both", expand=True, padx=self.px(10), pady=self.px(4))
         editor.insert("1.0", "\n".join(s["text"] for s in segments))
 
         def apply():
@@ -304,7 +316,7 @@ class App(tk.Tk):
                                 f"Субтитры исправлены, ролики перерендерены: {project}")
 
         ttk.Button(win, text="Применить и перерендерить", command=apply
-                   ).pack(anchor="e", padx=10, pady=8)
+                   ).pack(anchor="e", padx=self.px(10), pady=self.px(8))
 
     # ---------- журнал и статус ----------
 

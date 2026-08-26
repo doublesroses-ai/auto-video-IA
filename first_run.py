@@ -20,9 +20,12 @@ from tkinter import ttk, messagebox
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 
+from pipeline import dpi  # noqa: E402
 from pipeline.paths import python_exe  # noqa: E402
 from pipeline.config import ensure_dirs  # noqa: E402
 from pipeline.paths import user_dir  # noqa: E402
+
+dpi.enable()  # строго до создания окна Tk
 
 MARKER = APP_DIR / "first_run_done.marker"
 LIB_DIR = APP_DIR / "lib"
@@ -55,7 +58,8 @@ class Setup(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Автомонтаж видео — первая настройка")
-        self.geometry("620x440")
+        k = dpi.scale_of(self)
+        self.geometry(f"{int(620 * k)}x{int(460 * k)}")
         self.resizable(False, False)
 
         ttk.Label(self, text="Первая настройка", font=("Segoe UI", 15, "bold")
