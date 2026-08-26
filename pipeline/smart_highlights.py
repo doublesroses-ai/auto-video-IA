@@ -5,19 +5,52 @@
 тихо откатываемся на эвристику из highlights.py.
 """
 import json
+import os
+import subprocess
+import time
 import urllib.request
+from pathlib import Path
 
 from .highlights import _split_sentences, pick_highlights
 
 OLLAMA_URL = "http://localhost:11434"
 
 
-def _ollama_chat(model: str, prompt: str, timeout: float = 180.0) -> str:
+def _server_up() -> bool:
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3):
+            return True
+    except Exception:
+        return False
+
+
+def _start_server() -> bool:
+    """Поднимает сервер Ollama, если он установлен, но не запущен."""
+    exe = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama app.exe"
+    if not exe.is_file():
+        return False
+    try:
+        subprocess.Popen([str(exe)], creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        return False
+    for _ in range(12):  # ждём до ~12 секунд
+        time.sleep(1)
+        if _server_up():
+            return True
+    return False
+
+
+def _ollama_chat(model: str, prompt: str, timeout: float = 420.0) -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "format": "json",
+        # think=false: у «думающих» моделей (qwen3) отключаем длинные размышления —
+        # иначе ответ занимает минуты. keep_alive: модель остаётся в памяти видеокарты,
+        # чтобы следующее видео не ждало повторной загрузки.
+        "think": False,
+        "keep_alive": "15m",
         "options": {"num_ctx": 16384, "temperature": 0.3},
     }
     req = urllib.request.Request(
@@ -30,7 +63,10 @@ def _ollama_chat(model: str, prompt: str, timeout: float = 180.0) -> str:
     return data["message"]["content"]
 
 
-def ollama_available(model: str) -> bool:
+def ollama_available(model: str, autostart: bool = True) -> bool:
+    if not _server_up():
+        if not autostart or not _start_server():
+            return False
     try:
         with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3) as resp:
             tags = json.loads(resp.read().decode("utf-8"))
@@ -39,6 +75,30 @@ def ollama_available(model: str) -> bool:
                    for n in names)
     except Exception:
         return False
+
+
+def _fit_to_limits(sentences: list[dict], i: int, j: int,
+                   min_sec: float, max_sec: float) -> int | None:
+    """Подгоняет конец клипа под лимиты длительности, оставаясь на границе фразы.
+
+    Нейросеть иногда выходит за рамки: укорачиваем с конца или удлиняем следующими
+    фразами. Возвращает новый индекс последней фразы либо None, если подогнать нельзя.
+    """
+    start = sentences[i]["start"]
+
+    # слишком длинный — отрезаем фразы с конца, пока не влезет
+    while j > i and sentences[j]["end"] - start > max_sec:
+        j -= 1
+    # слишком короткий — добираем следующими фразами, не вылезая за максимум
+    while j + 1 < len(sentences) and sentences[j]["end"] - start < min_sec:
+        if sentences[j + 1]["end"] - start > max_sec:
+            break
+        j += 1
+
+    dur = sentences[j]["end"] - start
+    if dur > max_sec or dur < min_sec * 0.6:
+        return None
+    return j
 
 
 def _build_prompt(sentences: list[dict], count: int, min_sec: float, max_sec: float) -> str:
@@ -84,10 +144,13 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
             i, j = int(item["start_id"]), int(item["end_id"])
             if not (0 <= i <= j < len(sentences)):
                 continue
+            j = _fit_to_limits(sentences, i, j, min_sec, max_sec)
+            if j is None:
+                continue
             start = max(sentences[i]["start"] - 0.2, 0.0)
             end = min(sentences[j]["end"] + 0.35, total_duration)
             dur = end - start
-            if dur < min_sec * 0.6 or dur > max_sec * 1.3:
+            if dur < min_sec * 0.6:
                 continue
             # пересечения отбрасываем
             if any(not (end < c["start"] or start > c["end"]) for c in clips):
@@ -98,7 +161,18 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                 "score": 100.0 - len(clips),  # порядок нейросети = приоритет
             })
         if clips:
-            return clips[:count], "ollama"
+            clips = clips[:count]
+            # нейросеть нашла меньше, чем просили — добираем эвристикой
+            if len(clips) < count:
+                extra, _ = fallback()
+                for cand in extra:
+                    if len(clips) >= count:
+                        break
+                    if all(cand["end"] + min_gap_sec < c["start"]
+                           or cand["start"] > c["end"] + min_gap_sec for c in clips):
+                        clips.append(cand)
+                clips.sort(key=lambda c: c["score"], reverse=True)
+            return clips, "ollama"
     except Exception as exc:
         print(f"  Ollama не ответила ({type(exc).__name__}), использую эвристику")
     return fallback()
