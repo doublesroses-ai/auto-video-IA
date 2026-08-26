@@ -96,8 +96,15 @@ end;
 procedure RemoveWatcherTask();
 var
   ResultCode: Integer;
+  Script: String;
 begin
-  Exec(ExpandConstant('{cmd}'), '/C schtasks /Delete /TN "' + TaskName + '" /F',
+  // Удаляем задачу ТОЛЬКО если она запускает наблюдатель из этой установки.
+  // Иначе снесём автозапуск у копии, работающей из папки с исходниками.
+  Script :=
+    '$t = Get-ScheduledTask -TaskName ''' + TaskName + ''' -ErrorAction SilentlyContinue; ' +
+    'if ($t -and ($t.Actions.Arguments -like ''*' + ExpandConstant('{app}') + '*'')) ' +
+    '{ Unregister-ScheduledTask -TaskName ''' + TaskName + ''' -Confirm:$false }';
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
