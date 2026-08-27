@@ -110,7 +110,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{font},{font_size},&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(3, font_size // 16)},1,2,60,60,{margin_v},1
-Style: Title,{font},{title_size},&H00FFFFFF,&H00FFFFFF,&H00202020,&H00202020,-1,0,0,0,100,100,1,0,1,{max(4, title_size // 12)},3,8,{TITLE_SIDE_MARGIN},{TITLE_SIDE_MARGIN},{int(play_h * 0.10)},1
+Style: Title,{font},{title_size},&H00FFFFFF,&H00FFFFFF,&H00101010,&HA0101010,-1,0,0,0,100,100,1,0,3,{max(14, title_size // 5)},0,8,{TITLE_SIDE_MARGIN},{TITLE_SIDE_MARGIN},{int(play_h * 0.09)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

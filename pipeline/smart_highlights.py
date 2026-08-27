@@ -407,8 +407,25 @@ def _pick_by_storylines(model: str, cands: list[dict], max_count: int,
 
 MAX_TITLE_CHARS = 38      # длиннее не помещается в две строки титра
 
+# Эталоны стиля для запроса. Маленькая модель охотно списывает примеры дословно,
+# поэтому они же служат чёрным списком: такое название в ролик не попадёт.
+TITLE_EXAMPLES = (
+    "Выживание на Глебе",
+    "Путь к расколотой планете",
+    "Расколотая планета — это разочарование",
+    "Долгий путь в никуда",
+)
+
+
+def _is_copied_example(title: str) -> bool:
+    """Модель списала пример из запроса вместо того, чтобы придумать своё."""
+    normal = _topic_words(title)
+    return any(_similarity(normal, _topic_words(sample)) >= 0.8
+               for sample in TITLE_EXAMPLES)
+
 
 def _naming_prompt(clips: list[dict]) -> str:
+    examples = "\n".join(f"  «{x}»" for x in TITLE_EXAMPLES)
     listing = "\n\n".join(
         f"[{n}] сюжет: {c.get('storyline') or c.get('about', '')}\n"
         f"    речь: {c.get('text', '')[:420]}"
@@ -417,11 +434,8 @@ def _naming_prompt(clips: list[dict]) -> str:
     return f"""Ты придумываешь названия для коротких видео.
 
 Название должно быть ЗВУЧНЫМ: короткое, образное, передающее суть истории
-и её настроение. Вот эталоны — делай такие же:
-  «Выживание на Глебе»
-  «Путь к расколотой планете»
-  «Расколотая планета — это разочарование»
-  «Долгий путь в никуда»
+и её настроение. Вот эталоны СТИЛЯ — делай такие же по духу, но про своё:
+{examples}
 
 Как думать: сначала пойми, ЧТО за история в куске — что человек делал,
 чем это кончилось, что он почувствовал. Потом назови эту историю
@@ -468,6 +482,8 @@ def _make_titles(model: str, clips: list[dict]) -> None:
         title = str(item.get("title", "")).strip().strip('"«»')
         if not (0 <= idx < len(clips)) or not title:
             continue
+        if _is_copied_example(title):
+            continue          # это пример из запроса, а не название ролика
         if len(title) > MAX_TITLE_CHARS:
             title = _fallback_title({"about": title})
         clips[idx]["hook"] = title[:1].upper() + title[1:]
