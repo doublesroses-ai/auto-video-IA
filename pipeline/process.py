@@ -99,7 +99,7 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
     # 4. Выбираем лучшие моменты
     _log("Шаг 4/6: выбираю моменты для шортсов...")
     sh = cfg["shorts"]
-    limit, exact = shorts_count(cfg)
+    limit, exact = shorts_count(cfg, total)
     clips, engine = pick_highlights_smart(
         transcript, total, limit, sh["min_sec"], sh["max_sec"],
         sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg, exact)

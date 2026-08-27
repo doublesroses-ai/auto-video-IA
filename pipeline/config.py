@@ -20,7 +20,8 @@ DEFAULTS = {
         # "auto" — сколько в видео нашлось сюжетных линий, столько роликов
         # (но не больше max_count). Можно поставить число, тогда будет ровно оно.
         "count": "auto",
-        "max_count": 6,
+        "max_count": 4,
+        "minutes_per_short": 4,  # примерно один ролик на столько минут речи
         "min_sec": 25,
         "max_sec": 60,
         "min_gap_sec": 30,
@@ -83,16 +84,26 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
-def shorts_count(cfg: dict) -> tuple[int, bool]:
-    """Сколько роликов делать: (потолок, задано ли точное число)."""
+def shorts_count(cfg: dict, speech_seconds: float = 0.0) -> tuple[int, bool]:
+    """Сколько роликов делать: (потолок, задано ли точное число).
+
+    В режиме «auto» потолок дополнительно ограничен длиной материала: примерно
+    один ролик на каждые несколько минут речи. Иначе программа, чтобы набрать
+    заданное число сюжетов, начинает добирать экскурсии по базе — брать
+    сильных моментов больше просто неоткуда.
+    """
     sh = cfg.get("shorts", {})
     value = sh.get("count", "auto")
     if isinstance(value, str) and value.strip().lower() in ("auto", "авто", ""):
-        return int(sh.get("max_count", 6)), False
+        limit = int(sh.get("max_count", 4))
+        if speech_seconds > 0:
+            per = float(sh.get("minutes_per_short", 4)) * 60
+            limit = min(limit, max(1, int(speech_seconds // per) + 1))
+        return limit, False
     try:
         return max(1, int(value)), True
     except (TypeError, ValueError):
-        return int(sh.get("max_count", 6)), False
+        return int(sh.get("max_count", 4)), False
 
 
 def load_config() -> dict:

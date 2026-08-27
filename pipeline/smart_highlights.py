@@ -28,7 +28,11 @@ OLLAMA_URL = "http://localhost:11434"
 
 CHUNK_SENTENCES = 38      # окно разведки, примерно 2-4 минуты речи
 CHUNK_OVERLAP = 5         # перекрытие, чтобы момент не разорвался на границе
-PER_CHUNK = 2             # сколько моментов просить из одного окна
+PER_CHUNK = 4             # сколько моментов просить из одного окна
+# Просить 4 вместо 2 стоит восьми секунд на всё видео, зато в список попадают
+# сюжеты, которых программа раньше просто не видела. Менять только вместе
+# с лимитом ответа в _scout: при четырёх моментах в 250 токенов ответ не влезает
+# и окно теряется целиком.
 
 # слова, с которых не должен начинаться ролик
 _FILLER = (r"(?:э+|а+|м+|ну|вот|короче|так|ладно|значит|это|типа|как\s*бы|"
@@ -155,8 +159,11 @@ def _scout_prompt(sentences: list[dict], lo: int, hi: int,
 
 
 def _judge_prompt(candidates: list[dict]) -> str:
+    # 450 символов вместо 700 и без поля с пояснением: на дюжине кандидатов
+    # ответ упирался в лимит и обрывался на полуслове, а вместо заголовков
+    # в ролики попадали сырые куски расшифровки
     listing = "\n\n".join(
-        f"[{n}] ({c['duration']:.0f} с) {c['text'][:700]}"
+        f"[{n}] ({c['duration']:.0f} с) {c['text'][:450]}"
         for n, c in enumerate(candidates)
     )
     return f"""Ты редактор коротких роликов. Ниже — кандидаты в шортсы, каждый под номером.
@@ -166,14 +173,19 @@ def _judge_prompt(candidates: list[dict]) -> str:
 Слабый: перечисление, комментарий к картинке, обрыв на полуслове, много отсылок
 к тому, чего зритель не видел.
 
-Для каждого укажи оценку 1..10 и придумай заголовок до 8 слов — грамотный,
-по-русски, без выдумок сверх того, что сказано в тексте.
+Для каждого укажи оценку 1..10 и придумай заголовок до 8 слов.
+
+Заголовок — это НЕ цитата и не первые слова расшифровки, а короткая фраза
+о том, ЧТО в ролике происходит, — как подпись под видео в ленте.
+Грамотный русский, без выдуманных подробностей.
+  плохо: «Желтые глаза. Ладно, красным отказать»
+  хорошо: «Не пустил жильца из-за подделки»
 
 Если несколько кандидатов про ОДНО И ТО ЖЕ, высокую оценку дай только лучшему
 из них: подборка из похожих роликов зрителю неинтересна.
 
 Ответь строго JSON:
-{{"ranking":[{{"id":0,"score":9,"title":"заголовок","why":"кратко"}}]}}
+{{"ranking":[{{"id":0,"score":9,"title":"заголовок"}}]}}
 
 Кандидаты:
 {listing}
@@ -461,7 +473,7 @@ def _scout(model: str, sentences: list[dict], min_sec: float,
             break
         try:
             raw = _ollama_chat(model, _scout_prompt(sentences, lo, hi, min_sec, max_sec),
-                               num_predict=250)
+                               num_predict=700)
             data = json.loads(raw)
         except Exception as exc:
             print(f"  окно {lo}-{hi}: пропущено ({type(exc).__name__})")
@@ -482,13 +494,27 @@ def _scout(model: str, sentences: list[dict], min_sec: float,
 
 
 def _dedupe(cands: list[dict]) -> list[dict]:
-    """Убирает кандидатов, сильно налезающих друг на друга (перекрытие окон)."""
+    """Убирает настоящие дубли — куски, совпадающие больше чем наполовину.
+
+    Раньше выбрасывался любой кандидат, хоть краем задевший другого. Из-за
+    этого история «метеориты били в угол — поставил рельсовую пушку — вопросов
+    больше нет» вылетала каждый раз: она перекрывалась с экскурсией по базе
+    тремя фразами, и слабый кусок вытеснял сильный.
+    """
     cands.sort(key=lambda c: -c["strength"])
     kept: list[dict] = []
     for c in cands:
-        if any(not (c["j"] < k["i"] or c["i"] > k["j"]) for k in kept):
-            continue
-        kept.append(c)
+        duplicate = False
+        for k in kept:
+            overlap = min(c["j"], k["j"]) - max(c["i"], k["i"]) + 1
+            if overlap <= 0:
+                continue
+            shorter = min(c["j"] - c["i"] + 1, k["j"] - k["i"] + 1)
+            if overlap >= shorter * 0.5:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(c)
     return kept
 
 
@@ -598,15 +624,46 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
     return fallback()
 
 
+def _fallback_title(c: dict) -> str:
+    """Заголовок, когда судья не сработал.
+
+    Сырую расшифровку не берём никогда: она попадает титром прямо в кадр
+    и выглядит как обрывок бормотания. Обрезаем по границе слова, а не
+    по счётчику символов — иначе титр обрывается на середине слова.
+    """
+    text = (c.get("about") or c.get("text") or "").strip()
+    if not text:
+        return "Момент"
+    text = text.rstrip(" .").strip()
+    # длинное описание сокращаем до первой части — она обычно и есть суть
+    for sep in (", но ", ", а ", ", и ", ", "):
+        head = text.split(sep)[0]
+        if 20 <= len(head) <= 55:
+            text = head
+            break
+    if len(text) > 55:
+        words = text[:55].split()
+        text = " ".join(words[:-1]) if len(words) > 1 else words[0]
+    # предлог или союз в конце выдаёт обрубок: «...отказаться из-за»
+    tail = {"из-за", "для", "при", "над", "под", "перед", "через", "около", "без",
+            "про", "что", "чтобы", "потому", "как", "когда", "если", "и", "а",
+            "но", "в", "на", "с", "к", "по", "от", "до", "у", "о", "об", "за"}
+    parts = text.split()
+    while len(parts) > 2 and parts[-1].lower().strip(",") in tail:
+        parts.pop()
+    text = " ".join(parts)
+    return text[:1].upper() + text[1:]
+
+
 def _judge(model: str, cands: list[dict]) -> list[dict]:
     """Ранжирует кандидатов и даёт заголовки. При сбое — порядок по strength."""
     for c in cands:
-        c.setdefault("hook", c["text"][:80])
+        c.setdefault("hook", _fallback_title(c))
         c.setdefault("score", c["strength"])
-    if len(cands) < 2:
+    if not cands:
         return cands
     try:
-        raw = _ollama_chat(model, _judge_prompt(cands), num_predict=700)
+        raw = _ollama_chat(model, _judge_prompt(cands), num_predict=1500)
         ranking = json.loads(raw).get("ranking", [])
     except Exception as exc:
         print(f"  судья не ответил ({type(exc).__name__}), беру порядок разведки")

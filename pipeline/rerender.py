@@ -125,7 +125,7 @@ def repick_and_render(project: str) -> Path:
         signals = measure(str(tight), WORK_DIR / project, total)
 
     sh = cfg["shorts"]
-    limit, exact = shorts_count(cfg)
+    limit, exact = shorts_count(cfg, total)
     clips, engine = pick_highlights_smart(
         transcript, total, limit, sh["min_sec"], sh["max_sec"],
         sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg, exact)

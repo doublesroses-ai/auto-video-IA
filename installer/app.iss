@@ -7,7 +7,7 @@
 ; в папку приложения). Так же ставится Ollama.
 
 #define AppName "Автомонтаж видео"
-#define AppVersion "1.2.0"
+#define AppVersion "1.3.0"
 #define AppPublisher "doublesroses-ai"
 #define AppURL "https://github.com/doublesroses-ai/auto-video-IA"
 #define AppExeName "Автомонтаж видео.bat"
