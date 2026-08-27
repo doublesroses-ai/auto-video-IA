@@ -9,7 +9,8 @@
   },
   "shorts": {
     "count": "auto",
-    "max_count": 6,
+    "max_count": 4,
+    "minutes_per_short": 4,
     "min_sec": 25,
     "max_sec": 60,
     "min_gap_sec": 30

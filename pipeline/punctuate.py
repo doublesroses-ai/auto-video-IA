@@ -30,12 +30,26 @@ def _load_model():
     return _apply_te
 
 
+# В живой русской речи предложение — это примерно 8-12 слов. Если знаков конца
+# заметно меньше, границы фраз условны, и клипы начинают резаться посреди мысли.
+WORDS_PER_SENTENCE_LIMIT = 15
+PUNCT_CHUNK_WORDS = 20
+
+
 def _needs_punctuation(segments: list[dict]) -> bool:
-    """Пунктуация нужна, если реже чем в каждом четвёртом сегменте есть знаки."""
-    if not segments:
+    """Хватает ли в расшифровке знаков конца предложения.
+
+    Считаем знаки на слово, а не долю сегментов с точкой. Сегменты Whisper
+    длинные: одна точка в конце тридцатисловного куска помечала его как
+    «с пунктуацией», хотя внутри границ не было вовсе. Из-за этого
+    восстановление молча пропускалось, и потом лишь 7% фраз оказывались
+    законченными — клипы обрывались с обоих концов.
+    """
+    words = sum(len(s.get("words", [])) or len(s["text"].split()) for s in segments)
+    if words < 30:
         return False
-    with_punct = sum(1 for s in segments if _SENT_PUNCT.search(s["text"]))
-    return with_punct / len(segments) < 0.25
+    marks = sum(len(_SENT_PUNCT.findall(s["text"])) for s in segments)
+    return marks == 0 or words / marks > WORDS_PER_SENTENCE_LIMIT
 
 
 def _norm(s: str) -> str:
@@ -76,6 +90,21 @@ def _transfer(words: list[dict], tokens: list[str]) -> int:
                     break
                 t_end += 1
                 t_acc += _norm(tokens[t_end])
+
+        if o_acc != t_acc:
+            # Рассинхрон: ищем ближайшее слово, на котором списки снова сходятся.
+            # Простой сдвиг на одно слово в каждом списке разваливал разбор
+            # до конца куска, и знаки не переносились вовсе.
+            resync = None
+            for step in range(1, 6):
+                if oi + step < n_o and ti + step < n_t and \
+                        _norm(words[oi + step]["word"]) == _norm(tokens[ti + step]):
+                    resync = step
+                    break
+            if resync:
+                oi += resync
+                ti += resync
+                continue
 
         if o_acc and o_acc == t_acc:
             # заглавная буква — от первого токена группы
@@ -129,7 +158,9 @@ def restore_punctuation(transcript: dict, language: str | None = None) -> bool:
         return False
 
     changed = 0
-    for chunk in _chunks(all_words, 60):
+    # 20 слов, а не 60: на длинных кусках модель сбивает соответствие
+    # слов, и знаки не переносятся вовсе (замерено: 0 правок против 18)
+    for chunk in _chunks(all_words, PUNCT_CHUNK_WORDS):
         text = " ".join(_NON_WORD.sub("", w["word"]) or w["word"] for w in chunk)
         if not text.strip():
             continue

@@ -22,46 +22,62 @@ MAX_GAP_SEC = 1.0
 
 
 def _split_sentences(segments: list[dict]) -> list[dict]:
-    """Склеивает сегменты Whisper в предложения.
+    """Режет расшифровку на фразы ПО СЛОВАМ.
 
-    Разбивает по знакам конца предложения, а если их нет (частая история
-    с разговорной речью) — принудительно по паузам и длительности.
+    Раньше фразы собирались из целых сегментов Whisper, а сегмент — это в среднем
+    два десятка слов. Точка, поставленная в середине сегмента, для разбиения была
+    не видна, и на живой расшифровке законченными оказывались 3 фразы из 41.
+    Теперь границей служит само слово: знак конца предложения на нём, пауза
+    после него или предельная длина фразы.
     """
+    words = [w for seg in segments for w in seg.get("words", []) if w.get("word")]
+    if not words:
+        return _split_by_segments(segments)
+
     sentences = []
-    current_words: list[dict] = []
-    current_text: list[str] = []
+    current: list[dict] = []
     start = None
-    prev_end = None
 
     def flush(end_time, strong):
-        nonlocal current_words, current_text, start
-        text = " ".join(current_text).strip()
+        nonlocal current, start
+        text = " ".join(w["word"] for w in current).strip()
         if text and start is not None:
             sentences.append({
                 "start": start, "end": end_time, "text": text,
-                "n_words": len(current_words) or len(text.split()),
-                # strong: конец подтверждён знаком препинания или большой паузой,
+                "n_words": len(current),
+                # strong: конец подтверждён знаком препинания или паузой,
                 # то есть фраза действительно закончена по смыслу
                 "strong": strong,
             })
-        current_words, current_text, start = [], [], None
+        current, start = [], None
 
-    for seg in segments:
-        # длинная пауза между сегментами — граница мысли
-        if start is not None and prev_end is not None and \
-                seg["start"] - prev_end > MAX_GAP_SEC:
-            flush(prev_end, strong=True)
+    for n, w in enumerate(words):
         if start is None:
-            start = seg["start"]
-        current_text.append(seg["text"])
-        current_words.extend(seg.get("words", []))
-        prev_end = seg["end"]
-        if _SENTENCE_END.search(seg["text"]):
-            flush(seg["end"], strong=True)
-        elif seg["end"] - start > MAX_SENTENCE_SEC:
-            flush(seg["end"], strong=False)
-    if current_text and segments:
-        flush(segments[-1]["end"], strong=True)
+            start = w["start"]
+        current.append(w)
+        gap_next = (words[n + 1]["start"] - w["end"]) if n + 1 < len(words) else 0.0
+        if _SENTENCE_END.search(w["word"]):
+            flush(w["end"], strong=True)
+        elif gap_next > MAX_GAP_SEC:
+            flush(w["end"], strong=True)
+        elif w["end"] - start > MAX_SENTENCE_SEC:
+            flush(w["end"], strong=False)
+    if current:
+        flush(words[-1]["end"], strong=True)
+    return sentences
+
+
+def _split_by_segments(segments: list[dict]) -> list[dict]:
+    """Запасной разбор, когда у расшифровки нет таймкодов отдельных слов."""
+    sentences = []
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if text:
+            sentences.append({
+                "start": seg["start"], "end": seg["end"], "text": text,
+                "n_words": len(text.split()),
+                "strong": bool(_SENTENCE_END.search(text)),
+            })
     return sentences
 
 
