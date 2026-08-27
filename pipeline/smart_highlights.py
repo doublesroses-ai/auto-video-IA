@@ -169,6 +169,9 @@ def _judge_prompt(candidates: list[dict]) -> str:
 Для каждого укажи оценку 1..10 и придумай заголовок до 8 слов — грамотный,
 по-русски, без выдумок сверх того, что сказано в тексте.
 
+Если несколько кандидатов про ОДНО И ТО ЖЕ, высокую оценку дай только лучшему
+из них: подборка из похожих роликов зрителю неинтересна.
+
 Ответь строго JSON:
 {{"ranking":[{{"id":0,"score":9,"title":"заголовок","why":"кратко"}}]}}
 
@@ -233,6 +236,218 @@ def _piece_text(sentences: list[dict], i: int, j: int) -> str:
     return " ".join(sentences[k]["text"] for k in range(i, j + 1))
 
 
+# ---------------------------------------------------------------- разнообразие
+
+# служебные слова: встречаются у любых тем и только мешают их различать
+_STOPWORDS = {
+    "автор", "который", "которая", "которое", "чтобы", "потому", "этот", "этого",
+    "здесь", "очень", "может", "можно", "нужно", "будет", "было", "если", "когда",
+    "рассказ", "говорит", "объясн", "показ", "делает", "своих", "своей", "также",
+    "после", "перед", "около", "более", "менее", "самый", "самое", "самая",
+}
+_STEM = 5              # грубая нормализация окончаний: «планету» и «планета» → «плане»
+_SAME_TOPIC = 0.34     # выше этого считаем, что клипы про одно и то же
+
+
+def _topic_words(*texts: str) -> set[str]:
+    """Ключевые слова темы: длинные слова без окончаний и без служебных."""
+    words = set()
+    for text in texts:
+        for raw in re.findall(r"[\w-]+", (text or "").lower()):
+            if len(raw) < 4 or raw in _STOPWORDS:
+                continue
+            stem = raw[:_STEM]
+            if stem not in _STOPWORDS:
+                words.add(stem)
+    return words
+
+
+def _similarity(a: set[str], b: set[str]) -> float:
+    """Насколько две темы совпадают: 0 — про разное, 1 — про одно и то же."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _grouping_prompt(cands: list[dict]) -> str:
+    listing = "\n".join(
+        f"[{n}] {c.get('about') or c.get('hook', '')}"
+        for n, c in enumerate(cands)
+    )
+    return f"""Ниже — моменты, найденные в одном видео. Каждый описан одной фразой.
+
+Сгруппируй их по СЮЖЕТНЫМ ЛИНИЯМ: моменты об одном и том же событии, одной теме
+или одной части истории должны попасть в одну группу. Моменты про разное —
+в разные группы.
+
+Не объединяй всё подряд: если события действительно разные, пусть будет
+много маленьких групп. И не дроби одну историю на части: два взгляда
+на одно событие — это одна группа.
+
+Каждой группе дай короткое название по-русски.
+
+Ответь строго JSON:
+{{"groups":[{{"topic":"название линии","ids":[0,3]}},{{"topic":"другая линия","ids":[1]}}]}}
+
+Моменты:
+{listing}
+"""
+
+
+def _pick_by_storylines(model: str, cands: list[dict], max_count: int,
+                        min_gap_sec: float) -> list[dict] | None:
+    """Одна сюжетная линия — один ролик. Возвращает столько роликов, сколько линий.
+
+    Число роликов не задаётся заранее: сколько в видео нашлось разных историй,
+    столько и получится (но не больше max_count).
+    """
+    if len(cands) < 2:
+        return None
+    try:
+        raw = _ollama_chat(model, _grouping_prompt(cands), num_predict=400)
+        groups = json.loads(raw).get("groups", [])
+    except Exception as exc:
+        print(f"  разбор сюжетных линий не удался ({type(exc).__name__})")
+        return None
+
+    seen: set[int] = set()
+    best_of_group: list[dict] = []
+    for g in groups:
+        members = []
+        for item in g.get("ids", []):
+            try:
+                idx = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(cands) and idx not in seen:
+                seen.add(idx)
+                members.append(cands[idx])
+        if not members:
+            continue
+        winner = max(members, key=lambda c: c["score"])
+        winner["storyline"] = str(g.get("topic", ""))[:80]
+        best_of_group.append(winner)
+
+    # кандидаты, которых модель забыла разложить, считаем отдельными линиями
+    for idx, c in enumerate(cands):
+        if idx not in seen:
+            c["storyline"] = c.get("about", "")[:80]
+            best_of_group.append(c)
+
+    if not best_of_group:
+        return None
+
+    best_of_group.sort(key=lambda c: -c["score"])
+    chosen: list[dict] = []
+    for c in best_of_group:
+        if len(chosen) >= max_count:
+            break
+        if any(not (c["end"] + min_gap_sec < k["start"]
+                    or c["start"] > k["end"] + min_gap_sec) for k in chosen):
+            continue
+        chosen.append(c)
+    return chosen or None
+
+
+def _diverse_prompt(best: dict, rest: list[dict], need: int) -> str:
+    listing = "\n".join(
+        f"[{n}] (оценка {c['score']:.0f}) {c.get('about') or c.get('hook', '')}"
+        for n, c in enumerate(rest)
+    )
+    return f"""Собираем подборку роликов из одного видео. Один ролик уже выбран:
+
+  «{best.get('about') or best.get('hook', '')}»
+
+Ниже — остальные кандидаты с оценками силы. Выбери ещё {need} так, чтобы
+подборка получилась ПРО РАЗНОЕ.
+
+Правила:
+- не бери то, что про тот же сюжет, что и уже выбранный ролик;
+- не бери два кандидата про одно и то же между собой — из группы похожих
+  оставь один, самый сильный;
+- при прочих равных предпочитай высокую оценку.
+
+Ответь строго JSON, номера в порядке от лучшего:
+{{"picked":[0,4]}}
+
+Кандидаты:
+{listing}
+"""
+
+
+def _pick_diverse_by_model(model: str, cands: list[dict], count: int,
+                           min_gap_sec: float) -> list[dict] | None:
+    """Выбирает клипы про разные сюжеты. None, если не вышло.
+
+    Сравнивать темы по совпадению слов бесполезно: один и тот же сюжет модель
+    описывает каждый раз другими словами. А вот понять, что это одно и то же,
+    она умеет.
+
+    Самый сильный момент берётся всегда: без этого модель однажды собрала
+    красивую разнообразную подборку, выкинув из неё кульминацию стрима.
+    """
+    if len(cands) <= count or count < 2:
+        return None
+    best = cands[0]                       # список уже отсортирован судьёй
+    rest = cands[1:]
+    try:
+        raw = _ollama_chat(model, _diverse_prompt(best, rest, count - 1), num_predict=120)
+        ids = json.loads(raw).get("picked", [])
+    except Exception as exc:
+        print(f"  выбор разных сюжетов не удался ({type(exc).__name__})")
+        return None
+
+    chosen = [best]
+    for item in ids:
+        try:
+            idx = int(item)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(rest)) or rest[idx] in chosen:
+            continue
+        c = rest[idx]
+        if any(not (c["end"] + min_gap_sec < k["start"]
+                    or c["start"] > k["end"] + min_gap_sec) for k in chosen):
+            continue
+        chosen.append(c)
+        if len(chosen) >= count:
+            break
+    return chosen if len(chosen) > 1 else None
+
+
+def _pick_diverse(cands: list[dict], count: int, min_gap_sec: float) -> list[dict]:
+    """Отбирает лучшие клипы ПРО РАЗНОЕ.
+
+    Раньше брались просто три самых сильных — и все три легко оказывались про
+    один сюжет. Теперь каждый следующий клип обязан отличаться по теме от уже
+    выбранных; если непохожих не хватает, требование постепенно смягчается,
+    чтобы не остаться совсем без роликов.
+    """
+    for c in cands:
+        c["topic"] = _topic_words(c.get("about", ""), c.get("hook", ""))
+
+    chosen: list[dict] = []
+    for limit in (_SAME_TOPIC, 0.5, 0.7, 1.1):   # постепенно смягчаем требование
+        for c in cands:
+            if len(chosen) >= count:
+                break
+            if c in chosen:
+                continue
+            too_close_in_time = any(
+                not (c["end"] + min_gap_sec < k["start"] or c["start"] > k["end"] + min_gap_sec)
+                for k in chosen)
+            if too_close_in_time:
+                continue
+            same_topic = max((_similarity(c["topic"], k["topic"]) for k in chosen), default=0.0)
+            if same_topic >= limit:
+                continue
+            c["topic_overlap"] = round(same_topic, 2)
+            chosen.append(c)
+        if len(chosen) >= count:
+            break
+    return chosen
+
+
 # ---------------------------------------------------------------- разведка
 
 def _scout(model: str, sentences: list[dict], min_sec: float,
@@ -281,8 +496,8 @@ def _dedupe(cands: list[dict]) -> list[dict]:
 
 def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                           min_sec: float, max_sec: float, min_gap_sec: float,
-                          model: str, signals=None, cfg: dict | None = None
-                          ) -> tuple[list[dict], str]:
+                          model: str, signals=None, cfg: dict | None = None,
+                          exact_count: bool = False) -> tuple[list[dict], str]:
     """Возвращает (клипы, движок). Клип: {'pieces': [[a,b],...], 'hook', 'score'}."""
     av = cfg.get("av_signals", {}) if cfg else {}
 
@@ -319,6 +534,7 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                 "i": c["i"], "j": j, "start": round(start, 2), "end": round(end, 2),
                 "duration": end - start, "strength": c["strength"],
                 "text": _piece_text(sentences, c["i"], j),
+                "about": c.get("about", ""),
                 "closed": bool(sentences[j].get("strong")),
             })
         if not prepared:
@@ -330,11 +546,14 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                 frozen = signals.freeze_share(c["start"], c["end"])
                 dark = signals.dark_share(c["start"], c["end"])
                 energy = signals.energy(c["start"], c["end"])
-                # поправку храним отдельно: судья перезапишет оценку, и штраф
-                # за застывший экран иначе бы потерялся
+                # Поправку храним отдельно: судья перезапишет оценку, и штраф
+                # за застывший экран иначе бы потерялся.
+                # Величина намеренно скромная: оценки идут по десятибалльной
+                # шкале, и слишком крупный штраф однажды выбросил кульминацию стрима
+                # только за то, что в кадре была статичная карта.
                 c["av_adjust"] = (
-                    - frozen * float(av.get("freeze_penalty", 2.0)) * 5
-                    - dark * float(av.get("dark_penalty", 1.0)) * 2
+                    - frozen * float(av.get("freeze_penalty", 2.0))
+                    - dark * float(av.get("dark_penalty", 1.0))
                     + max(energy, 0) * float(av.get("energy_bonus", 0.10))
                 )
                 c["strength"] += c["av_adjust"]
@@ -342,22 +561,37 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
             prepared.sort(key=lambda c: -c["strength"])
 
         # судья сравнивает выживших между собой и придумывает заголовки
-        judged = _judge(model, prepared[:8])
+        judged = _judge(model, prepared[:12])
+        # разбираем кандидатов по сюжетным линиям: одна линия — один ролик
+        picked = _pick_by_storylines(model, judged, count, min_gap_sec)
+        if not picked:
+            picked = (_pick_diverse_by_model(model, judged, count, min_gap_sec)
+                      or _pick_diverse(judged, count, min_gap_sec))
+        # если попросили ровно N роликов, а линий нашлось меньше — добираем
+        if exact_count and len(picked) < count:
+            for c in judged:
+                if len(picked) >= count:
+                    break
+                if c in picked:
+                    continue
+                if any(not (c["end"] + min_gap_sec < k["start"]
+                            or c["start"] > k["end"] + min_gap_sec) for k in picked):
+                    continue
+                picked.append(c)
 
         clips = []
-        for c in judged:
-            if len(clips) >= count:
-                break
-            if any(not (c["end"] + min_gap_sec < k["pieces"][0][0]
-                        or c["start"] > k["pieces"][-1][1] + min_gap_sec) for k in clips):
-                continue
+        for c in picked:
             clips.append({
                 "pieces": [[c["start"], c["end"]]],
                 "start": c["start"], "end": c["end"],   # для обратной совместимости
                 "hook": c["hook"],
+                "about": c.get("about", ""),
+                "storyline": c.get("storyline", ""),
                 "score": round(c["score"], 2),
             })
         if clips:
+            for c in clips:
+                print(f"  сюжет: {c.get('storyline') or c.get('about', '')[:60]}")
             return clips, "ollama"
     except Exception as exc:
         print(f"  Ollama не ответила ({type(exc).__name__}), использую эвристику")

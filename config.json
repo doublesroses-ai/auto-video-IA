@@ -8,7 +8,8 @@
     "pad_sec": 0.12
   },
   "shorts": {
-    "count": 3,
+    "count": "auto",
+    "max_count": 6,
     "min_sec": 25,
     "max_sec": 60,
     "min_gap_sec": 30

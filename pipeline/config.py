@@ -17,7 +17,10 @@ DEFAULTS = {
         "pad_sec": 0.12,
     },
     "shorts": {
-        "count": 3,
+        # "auto" — сколько в видео нашлось сюжетных линий, столько роликов
+        # (но не больше max_count). Можно поставить число, тогда будет ровно оно.
+        "count": "auto",
+        "max_count": 6,
         "min_sec": 25,
         "max_sec": 60,
         "min_gap_sec": 30,
@@ -78,6 +81,18 @@ def _merge(base: dict, override: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+def shorts_count(cfg: dict) -> tuple[int, bool]:
+    """Сколько роликов делать: (потолок, задано ли точное число)."""
+    sh = cfg.get("shorts", {})
+    value = sh.get("count", "auto")
+    if isinstance(value, str) and value.strip().lower() in ("auto", "авто", ""):
+        return int(sh.get("max_count", 6)), False
+    try:
+        return max(1, int(value)), True
+    except (TypeError, ValueError):
+        return int(sh.get("max_count", 6)), False
 
 
 def load_config() -> dict:

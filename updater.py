@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REPO = "doublesroses-ai/auto-video-IA"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ALLOWED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com",

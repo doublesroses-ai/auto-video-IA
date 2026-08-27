@@ -3,7 +3,7 @@ import json
 import time
 from pathlib import Path
 
-from .config import load_config, OUTPUT_DIR, WORK_DIR, INPUT_DIR
+from .config import load_config, shorts_count, OUTPUT_DIR, WORK_DIR, INPUT_DIR
 from .ffmpeg_utils import duration_of, video_size
 from .av_signals import measure
 from .punctuate import restore_punctuation
@@ -125,9 +125,10 @@ def repick_and_render(project: str) -> Path:
         signals = measure(str(tight), WORK_DIR / project, total)
 
     sh = cfg["shorts"]
+    limit, exact = shorts_count(cfg)
     clips, engine = pick_highlights_smart(
-        transcript, total, sh["count"], sh["min_sec"], sh["max_sec"],
-        sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg)
+        transcript, total, limit, sh["min_sec"], sh["max_sec"],
+        sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg, exact)
     clips = [c for c in clips if _clip_duration(c) >= 5]
     _log(f"Выбрано клипов: {len(clips)} "
          f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")

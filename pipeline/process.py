@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .config import load_config, OUTPUT_DIR, WORK_DIR
+from .config import load_config, shorts_count, OUTPUT_DIR, WORK_DIR
 from .ffmpeg_utils import duration_of, video_size, has_audio
 from .silence import cut_silences
 from .transcribe import transcribe
@@ -99,9 +99,10 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
     # 4. Выбираем лучшие моменты
     _log("Шаг 4/6: выбираю моменты для шортсов...")
     sh = cfg["shorts"]
+    limit, exact = shorts_count(cfg)
     clips, engine = pick_highlights_smart(
-        transcript, total, sh["count"], sh["min_sec"], sh["max_sec"],
-        sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg)
+        transcript, total, limit, sh["min_sec"], sh["max_sec"],
+        sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg, exact)
     clips = [c for c in clips if _clip_duration(c) >= 5]
     _log(f"  выбрано клипов: {len(clips)} "
          f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")
