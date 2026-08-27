@@ -123,6 +123,7 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
             subs["font"], subs["vertical_font_size"],
             subs["uppercase"], subs["max_words_per_card"],
             bottom_margin_ratio=0.30,
+            title=clip.get("hook", "") if subs["show_title"] else "",
         ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
         ass_file = work / f"short_{i:02d}.ass"
         ass_file.write_text(ass_text, encoding="utf-8")

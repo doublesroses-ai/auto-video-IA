@@ -229,16 +229,60 @@ def _fit_end(sentences: list[dict], i: int, j: int,
     return j
 
 
+# Слова, с которых фраза не может начинаться: это середина мысли.
+# Союзы и слова-отсылки выдают обрубок вернее, чем «ну» и «вот».
+_FRAGMENT_START = {
+    "что", "чтобы", "который", "которая", "которое", "которые", "тоже", "также",
+    "потому", "поэтому", "хотя", "если", "когда", "пока", "чем", "либо",
+    "а", "и", "но", "или", "же", "ведь", "зато", "причём", "притом",
+    # наречия-усилители тоже почти всегда стоят в середине мысли
+    "очень", "просто", "прямо", "именно", "особенно", "довольно", "весьма",
+}
+
+
+def _starts_mid_thought(sentence: dict) -> bool:
+    words = re.findall(r"[\w-]+", sentence.get("text", "").lower())
+    return bool(words) and words[0] in _FRAGMENT_START
+
+
+def _fix_start(sentences: list[dict], i: int, j: int, min_sec: float) -> int:
+    """Сдвигает начало клипа с середины мысли на нормальное начало фразы.
+
+    Хорошее начало — это фраза, перед которой мысль была закончена. Если
+    первая фраза клипа начинается с союза или слова-отсылки («что», «тоже»,
+    «а»), зритель слышит обрубок и не понимает, к чему это.
+    """
+    for step in range(3):
+        k = i + step
+        if k >= j:
+            break
+        previous_closed = k == 0 or sentences[k - 1].get("strong")
+        if previous_closed and not _starts_mid_thought(sentences[k]):
+            return k
+        # сдвигаться дальше можно, только если клип не станет короче нужного
+        if sentences[j]["end"] - sentences[k + 1]["start"] < min_sec * 0.8:
+            break
+    return i
+
+
 def _trim_filler(words: list[dict], start: float) -> float:
-    """Сдвигает начало клипа за слова-паразиты. Возвращает новое начало."""
-    head = [w for w in words if start - 0.01 <= w["start"] < start + 2.0]
+    """Сдвигает начало клипа за слова-паразиты. Возвращает новое начало.
+
+    Если после срезания первым словом окажется союз, чистку отменяем:
+    «Ну что 14 тысяч достаточно долго» — нормальное начало, а «что 14 тысяч
+    достаточно долго» уже звучит как обрубок. Убирая одно, легко создать другое.
+    """
+    head = [w for w in words if start - 0.01 <= w["start"] < start + 2.5]
     cut = start
     removed = 0
-    for w in head:
+    for n, w in enumerate(head):
         if removed >= MAX_FILLER_WORDS or w["end"] - start > MAX_FILLER_TRIM_SEC:
             break
         if not _FILLER_WORD.match(w["word"]):
             break
+        following = head[n + 1]["word"].lower().strip(".,!?—-") if n + 1 < len(head) else ""
+        if following in _FRAGMENT_START:
+            break          # срезав это слово, оголим союз — оставляем как есть
         cut = w["end"]
         removed += 1
     return cut
@@ -359,6 +403,92 @@ def _pick_by_storylines(model: str, cands: list[dict], max_count: int,
             continue
         chosen.append(c)
     return chosen or None
+
+
+MAX_TITLE_CHARS = 38      # длиннее не помещается в две строки титра
+
+
+def _naming_prompt(clips: list[dict]) -> str:
+    listing = "\n\n".join(
+        f"[{n}] сюжет: {c.get('storyline') or c.get('about', '')}\n"
+        f"    речь: {c.get('text', '')[:420]}"
+        for n, c in enumerate(clips)
+    )
+    return f"""Ты придумываешь названия для коротких видео.
+
+Название должно быть ЗВУЧНЫМ: короткое, образное, передающее суть истории
+и её настроение. Вот эталоны — делай такие же:
+  «Выживание на Глебе»
+  «Путь к расколотой планете»
+  «Расколотая планета — это разочарование»
+  «Долгий путь в никуда»
+
+Как думать: сначала пойми, ЧТО за история в куске — что человек делал,
+чем это кончилось, что он почувствовал. Потом назови эту историю
+одной короткой фразой, как называют главу книги.
+
+Так НЕ надо:
+  «Автор рассказывает о производстве пакетов» — это пересказ, а не название
+  «Что 14 тысяч достаточно долго» — это первая фраза из речи
+  «Решение отказаться от дальнейших действий» — канцелярит
+
+Правила: от двух до пяти слов, не длиннее {MAX_TITLE_CHARS} символов.
+Без слов «автор», «рассказывает», «объясняет», «показывает».
+Можно назвать место, предмет или чувство, о которых идёт речь.
+Не выдумывай того, чего в куске нет.
+
+Ответь строго JSON:
+{{"titles":[{{"id":0,"title":"Долгий путь в никуда"}}]}}
+
+Куски:
+{listing}
+"""
+
+
+def _make_titles(model: str, clips: list[dict]) -> None:
+    """Даёт клипам звучные названия по сюжету. Правит clips на месте.
+
+    Отдельный проход, потому что судья занят сравнением и выдаёт описания
+    вида «Автор рассказывает о...». Название — другая задача: сначала понять
+    историю, потом придумать ей имя.
+    """
+    if not clips:
+        return
+    try:
+        raw = _ollama_chat(model, _naming_prompt(clips), num_predict=400)
+        titles = json.loads(raw).get("titles", [])
+    except Exception as exc:
+        print(f"  названия не придумались ({type(exc).__name__}), беру рабочие")
+        return
+    for item in titles:
+        try:
+            idx = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        title = str(item.get("title", "")).strip().strip('"«»')
+        if not (0 <= idx < len(clips)) or not title:
+            continue
+        if len(title) > MAX_TITLE_CHARS:
+            title = _fallback_title({"about": title})
+        clips[idx]["hook"] = title[:1].upper() + title[1:]
+
+
+def _drop_twin_titles(clips: list[dict]) -> list[dict]:
+    """Убирает клипы с почти одинаковыми заголовками.
+
+    Разбор по сюжетным линиям иногда разводит по разным группам то, что
+    зритель прочитает как одно и то же: «Не могу поддерживать термоядерный
+    синтез» и «Поддерживать термоядерный синтез» в одной подборке выглядят
+    как ошибка. Это последняя проверка перед рендером.
+    """
+    kept: list[dict] = []
+    for c in clips:
+        title_words = _topic_words(c.get("hook", ""))
+        twin = any(_similarity(title_words, _topic_words(k.get("hook", ""))) >= 0.65
+                   for k in kept)
+        if not twin:
+            kept.append(c)
+    return kept
 
 
 def _diverse_prompt(best: dict, rest: list[dict], need: int) -> str:
@@ -552,14 +682,15 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
             j = _fit_end(sentences, c["i"], c["j"], min_sec, max_sec)
             if j is None:
                 continue
-            start = _trim_filler(words, sentences[c["i"]]["start"])
+            begin = _fix_start(sentences, c["i"], j, min_sec)
+            start = _trim_filler(words, sentences[begin]["start"])
             end = min(sentences[j]["end"], total_duration)
             if end - start < min_sec * 0.6:
                 continue
             prepared.append({
-                "i": c["i"], "j": j, "start": round(start, 2), "end": round(end, 2),
+                "i": begin, "j": j, "start": round(start, 2), "end": round(end, 2),
                 "duration": end - start, "strength": c["strength"],
-                "text": _piece_text(sentences, c["i"], j),
+                "text": _piece_text(sentences, begin, j),
                 "about": c.get("about", ""),
                 "closed": bool(sentences[j].get("strong")),
             })
@@ -604,6 +735,9 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                             or c["start"] > k["end"] + min_gap_sec) for k in picked):
                     continue
                 picked.append(c)
+
+        _make_titles(model, picked)          # звучные названия по сюжету
+        picked = _drop_twin_titles(picked)
 
         clips = []
         for c in picked:

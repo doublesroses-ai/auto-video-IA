@@ -31,26 +31,14 @@ def _audio_chain(has_music: bool, music_volume: float, fade_at: float | None = N
     return _audio_chain_from("0:a", 1 if has_music else None, music_volume, fade_at)
 
 
-def _title_card(text: str, width: int, height: int, font: str,
-                seconds: float = 2.2) -> str:
-    """Строка фильтра drawtext: заголовок в верхней трети первые секунды."""
-    if not text:
-        return ""
-    safe = (text.replace("\\", "").replace(":", r"\:")
-            .replace("'", "").replace("%", ""))
-    size = max(int(height * 0.036), 28)
-    return (
-        f",drawtext=text='{safe}':fontfile='C\\:/Windows/Fonts/ariblk.ttf'"
-        f":fontsize={size}:fontcolor=white:borderw={max(3, size // 12)}:bordercolor=black"
-        f":x=(w-text_w)/2:y=h*0.13:line_spacing=8"
-        f":enable='lt(t,{seconds:g})'"
-    )
-
-
 def _vertical_chain(label_in: str, width: int, height: int, background: str,
-                    sub: str, vfade: str, title: str, font: str) -> str:
-    """Общая для одного и нескольких кусков сборка вертикального кадра."""
-    card = _title_card(title, width, height, font)
+                    sub: str, vfade: str) -> str:
+    """Общая для одного и нескольких кусков сборка вертикального кадра.
+
+    Заголовок рисуется не здесь, а в файле субтитров: там есть перенос строк
+    и настоящие стили, а drawtext молча уезжал за края кадра на длинном тексте.
+    """
+    card = ""
     if background == "crop":
         return (
             f"[{label_in}]scale={width}:{height}:force_original_aspect_ratio=increase,"
@@ -118,7 +106,7 @@ def render_vertical(src: str, pieces: list[list[float]], ass_file: str, dst: str
 
     achain = _audio_chain_from(ain, music_index, music_volume, fade_at=total - 0.55)
     script = ("".join(parts)
-              + _vertical_chain(vin, width, height, background, sub, vfade, title, font)
+              + _vertical_chain(vin, width, height, background, sub, vfade)
               + ";" + achain)
 
     # длинный граф передаём файлом: в командной строке Windows он не помещается

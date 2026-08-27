@@ -65,15 +65,41 @@ def _group_cards(words: list[dict], max_words: int) -> list[list[dict]]:
     return cards
 
 
+TITLE_SECONDS = 2.8       # сколько держится заголовок в начале ролика
+TITLE_SIDE_MARGIN = 70    # отступы по краям, чтобы текст не упирался в рамку
+
+
+def _title_font_size(text: str, play_w: int) -> int:
+    """Размер шрифта под длину заголовка.
+
+    Заголовок должен уложиться в две строки: у Arial Black буква занимает
+    примерно 0.62 от кегля, отсюда и считаем. Раньше размер был постоянным,
+    и длинный заголовок просто уезжал за края кадра.
+    """
+    usable = play_w - 2 * TITLE_SIDE_MARGIN
+    per_line = max(len(text) / 2, 1)          # целимся в две строки
+    size = int(usable / (per_line * 0.62))
+    return max(40, min(size, int(play_w * 0.075)))
+
+
+def _ass_escape(text: str) -> str:
+    """Убирает из текста то, что ASS примет за разметку."""
+    return (text.replace("\\", "")
+                .replace("{", "").replace("}", "")
+                .replace("\n", " ").strip())
+
+
 def build_ass_pieces(transcript: dict, pieces: list[list[float]],
                      play_w: int, play_h: int, font: str, font_size: int,
                      uppercase: bool, max_words: int,
-                     bottom_margin_ratio: float) -> str:
+                     bottom_margin_ratio: float, title: str = "") -> str:
     """Содержимое .ass для ролика, склеенного из перечисленных кусков."""
     words = _collect_words(transcript, pieces)
     cards = _group_cards(words, max_words)
 
     margin_v = int(play_h * bottom_margin_ratio)
+    title = _ass_escape(title)
+    title_size = _title_font_size(title, play_w) if title else 60
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {play_w}
@@ -84,6 +110,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{font},{font_size},&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(3, font_size // 16)},1,2,60,60,{margin_v},1
+Style: Title,{font},{title_size},&H00FFFFFF,&H00FFFFFF,&H00202020,&H00202020,-1,0,0,0,100,100,1,0,1,{max(4, title_size // 12)},3,8,{TITLE_SIDE_MARGIN},{TITLE_SIDE_MARGIN},{int(play_h * 0.10)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -91,6 +118,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # PrimaryColour жёлтый, SecondaryColour белый: karaoke-теги \k подсвечивают
     # произносимое слово жёлтым, остальные остаются белыми.
     lines = []
+    if title:
+        # Заголовок сверху: плавно проявляется, сам переносится по словам
+        # и уходит, не мешая смотреть. Держится в размытом поле над кадром.
+        lines.append(
+            f"Dialogue: 0,{_ass_time(0)},{_ass_time(TITLE_SECONDS)},Title,,0,0,0,,"
+            f"{{\\fad(350,450)}}{title}"
+        )
     for card in cards:
         start = card[0]["start"]
         end = card[-1]["end"]
