@@ -1,11 +1,22 @@
 """Умный отбор моментов через локальную нейросеть (Ollama).
 
-Нейросеть читает расшифровку и сама решает, какие фрагменты самые цепляющие
-и где по смыслу закончить клип. Если Ollama не запущена или ответ кривой —
-тихо откатываемся на эвристику из highlights.py.
+Как это работает:
+  1. Расшифровка режется на окна по несколько минут, и по каждому окну модель
+     ищет сильные моменты. Одним запросом на всё видео она читала только начало
+     и не видела финала — самого ценного в стриме.
+  2. Кандидаты подгоняются кодом: конец переносится на законченную фразу,
+     мусорное начало («ну, вот, короче») срезается, длительность вводится в рамки.
+     Модель эти правила игнорирует, поэтому их добивает код.
+  3. Картинка и звук штрафуют кандидатов с застывшим экраном и добавляют вес
+     эмоциональным местам.
+  4. Судья одним запросом сравнивает всех выживших между собой. Маленькая модель
+     плохо оценивает клип в отрыве, но хорошо сравнивает несколько.
+
+Если Ollama недоступна или ответ кривой — тихо откатываемся на эвристику.
 """
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -15,6 +26,21 @@ from .highlights import _split_sentences, pick_highlights
 
 OLLAMA_URL = "http://localhost:11434"
 
+CHUNK_SENTENCES = 38      # окно разведки, примерно 2-4 минуты речи
+CHUNK_OVERLAP = 5         # перекрытие, чтобы момент не разорвался на границе
+PER_CHUNK = 2             # сколько моментов просить из одного окна
+
+# слова, с которых не должен начинаться ролик
+_FILLER = (r"(?:э+|а+|м+|ну|вот|короче|так|ладно|значит|это|типа|как\s*бы|"
+           r"в\s*общем|слушай|смотри|давай|окей|ага|угу|да)")
+_FILLER_HEAD = re.compile(rf"^(?:\W*\b{_FILLER}\b[\s,.\-–—]*)+", re.IGNORECASE)
+_FILLER_WORD = re.compile(rf"^\W*{_FILLER}\W*$", re.IGNORECASE)
+
+MAX_FILLER_TRIM_SEC = 1.5
+MAX_FILLER_WORDS = 2
+
+
+# ---------------------------------------------------------------- сервер
 
 def _server_up() -> bool:
     try:
@@ -33,34 +59,11 @@ def _start_server() -> bool:
         subprocess.Popen([str(exe)], creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         return False
-    for _ in range(12):  # ждём до ~12 секунд
+    for _ in range(12):
         time.sleep(1)
         if _server_up():
             return True
     return False
-
-
-def _ollama_chat(model: str, prompt: str, timeout: float = 420.0) -> str:
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "format": "json",
-        # think=false: у «думающих» моделей (qwen3) отключаем длинные размышления —
-        # иначе ответ занимает минуты. keep_alive: модель остаётся в памяти видеокарты,
-        # чтобы следующее видео не ждало повторной загрузки.
-        "think": False,
-        "keep_alive": "15m",
-        "options": {"num_ctx": 16384, "temperature": 0.3},
-    }
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["message"]["content"]
 
 
 def ollama_available(model: str, autostart: bool = True) -> bool:
@@ -71,108 +74,331 @@ def ollama_available(model: str, autostart: bool = True) -> bool:
         with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3) as resp:
             tags = json.loads(resp.read().decode("utf-8"))
         names = [m.get("name", "") for m in tags.get("models", [])]
-        return any(n == model or n.startswith(model + ":") or n.split(":")[0] == model.split(":")[0]
-                   for n in names)
+        return any(n == model or n.startswith(model + ":")
+                   or n.split(":")[0] == model.split(":")[0] for n in names)
     except Exception:
         return False
 
 
-def _fit_to_limits(sentences: list[dict], i: int, j: int,
-                   min_sec: float, max_sec: float) -> int | None:
-    """Подгоняет конец клипа под лимиты длительности, оставаясь на границе фразы.
+def _ollama_chat(model: str, prompt: str, num_predict: int,
+                 timeout: float = 300.0) -> str:
+    """Один запрос к модели. num_predict обязателен: без потолка модель однажды
+    зациклилась и молотила пять минут."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "format": "json",
+        # think=false: у «думающих» моделей (qwen3) размышления вслух занимают минуты
+        "think": False,
+        "keep_alive": "15m",
+        "options": {
+            "num_ctx": 8192,          # окно разведки в него влезает с запасом
+            "num_predict": num_predict,
+            "temperature": 0.15,
+        },
+    }
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))["message"]["content"]
 
-    Нейросеть иногда выходит за рамки: укорачиваем с конца или удлиняем следующими
-    фразами. Возвращает новый индекс последней фразы либо None, если подогнать нельзя.
-    """
-    start = sentences[i]["start"]
 
-    # слишком длинный — отрезаем фразы с конца, пока не влезет
-    while j > i and sentences[j]["end"] - start > max_sec:
-        j -= 1
-    # слишком короткий — добираем следующими фразами, не вылезая за максимум
-    while j + 1 < len(sentences) and sentences[j]["end"] - start < min_sec:
-        if sentences[j + 1]["end"] - start > max_sec:
-            break
-        j += 1
+# ---------------------------------------------------------------- промпты
 
-    dur = sentences[j]["end"] - start
-    if dur > max_sec or dur < min_sec * 0.6:
-        return None
-    return j
+def _scout_prompt(sentences: list[dict], lo: int, hi: int,
+                  min_sec: float, max_sec: float) -> str:
+    listing = "\n".join(
+        f"[{i}] ({sentences[i]['end'] - sentences[i]['start']:.0f} с) {sentences[i]['text']}"
+        for i in range(lo, hi)
+    )
+    return f"""Ты монтажёр вертикальных роликов для TikTok и YouTube Shorts.
+Ниже — кусок расшифровки видео: пронумерованные фразы с длительностью.
+Найди в ЭТОМ куске до {PER_CHUNK} моментов, из которых получится самостоятельный ролик.
 
+Момент — непрерывный диапазон фраз [start_id..end_id] длиной {min_sec:.0f}-{max_sec:.0f} секунд.
 
-def _build_prompt(sentences: list[dict], count: int, min_sec: float, max_sec: float) -> str:
-    lines = [
-        f"[{i}] ({s['start']:.0f}-{s['end']:.0f} с) {s['text']}"
-        for i, s in enumerate(sentences)
-    ]
-    listing = "\n".join(lines)
-    return f"""Ты монтажёр коротких вертикальных видео (TikTok / YouTube Shorts).
-Ниже — пронумерованные фразы из расшифровки видео с таймкодами в секундах.
+Что делает момент сильным:
+- в нём что-то ПРОИСХОДИТ: результат, провал, неожиданность, спор, признание,
+  удивившая цифра, сильная эмоция;
+- он понятен человеку, который не видел остального видео;
+- он ЗАКАНЧИВАЕТСЯ: вывод, реакция, итог. Не обрывается на полуслове.
 
-Выбери {count} САМЫХ цепляющих фрагментов для шортсов. Правила:
-- Фрагмент — это диапазон подряд идущих фраз: от start_id до end_id включительно.
-- Длительность фрагмента: от {min_sec:.0f} до {max_sec:.0f} секунд (по таймкодам).
-- Фрагмент должен начинаться с интригующей фразы (хук) и заканчиваться ЗАВЕРШЁННОЙ мыслью.
-- Фрагменты не должны пересекаться.
-- В hook напиши цепляющий заголовок для этого шортса (до 8 слов, по-русски).
+Что моментом НЕ является (не бери такое):
+- экскурсия и перечисление: «тут у меня это, тут вон то, а вот здесь ещё»;
+- комментарий к картинке: «смотрите сюда», «вот эта штука» — зритель не поймёт, о чём речь;
+- бормотание и мысли вслух без вывода.
 
-Ответь строго JSON-объектом вида:
-{{"clips": [{{"start_id": 0, "end_id": 3, "hook": "заголовок"}}]}}
+Границы:
+- start_id не должен начинаться с «ну», «вот», «так», «короче», «ладно», «значит»,
+  «эээ» или с обрывка фразы — сдвинь начало на следующую фразу;
+- end_id — фраза, на которой мысль закончена.
+
+Если в этом куске нет ничего сильного, верни пустой список — это нормально
+и лучше, чем притянутый за уши момент.
+
+Для каждого момента укажи:
+  start_id, end_id
+  strength — 1..10, насколько это зацепит человека, впервые увидевшего ролик
+  about — о чём момент, одним предложением
+  ending — чем он заканчивается, до 10 слов
+
+Ответь строго JSON:
+{{"moments":[{{"start_id":12,"end_id":18,"strength":8,"about":"...","ending":"..."}}]}}
 
 Фразы:
 {listing}
 """
 
 
+def _judge_prompt(candidates: list[dict]) -> str:
+    listing = "\n\n".join(
+        f"[{n}] ({c['duration']:.0f} с) {c['text'][:700]}"
+        for n, c in enumerate(candidates)
+    )
+    return f"""Ты редактор коротких роликов. Ниже — кандидаты в шортсы, каждый под номером.
+
+Расставь их по силе: какой зацепит зрителя, впервые увидевшего ролик, а какой нет.
+Сильный: что-то происходит, понятен без контекста, заканчивается выводом или реакцией.
+Слабый: перечисление, комментарий к картинке, обрыв на полуслове, много отсылок
+к тому, чего зритель не видел.
+
+Для каждого укажи оценку 1..10 и придумай заголовок до 8 слов — грамотный,
+по-русски, без выдумок сверх того, что сказано в тексте.
+
+Ответь строго JSON:
+{{"ranking":[{{"id":0,"score":9,"title":"заголовок","why":"кратко"}}]}}
+
+Кандидаты:
+{listing}
+"""
+
+
+# ---------------------------------------------------------------- подгонка
+
+def _fit_end(sentences: list[dict], i: int, j: int,
+             min_sec: float, max_sec: float) -> int | None:
+    """Двигает конец клипа на законченную фразу внутри лимитов длительности."""
+    start = sentences[i]["start"]
+
+    # если вылезли за максимум — отходим назад
+    while j > i and sentences[j]["end"] - start > max_sec:
+        j -= 1
+    # если не добрали минимум — тянем вперёд
+    while j + 1 < len(sentences) and sentences[j]["end"] - start < min_sec:
+        if sentences[j + 1]["end"] - start > max_sec:
+            break
+        j += 1
+    if sentences[j]["end"] - start > max_sec:
+        return None
+
+    # предпочитаем закончить на фразе, которая действительно завершена
+    if not sentences[j].get("strong"):
+        forward = j
+        while forward + 1 < len(sentences):
+            forward += 1
+            if sentences[forward]["end"] - start > max_sec:
+                break
+            if sentences[forward].get("strong"):
+                return forward
+        back = j
+        while back > i:
+            back -= 1
+            if sentences[back]["end"] - start < min_sec * 0.8:
+                break
+            if sentences[back].get("strong"):
+                return back
+    return j
+
+
+def _trim_filler(words: list[dict], start: float) -> float:
+    """Сдвигает начало клипа за слова-паразиты. Возвращает новое начало."""
+    head = [w for w in words if start - 0.01 <= w["start"] < start + 2.0]
+    cut = start
+    removed = 0
+    for w in head:
+        if removed >= MAX_FILLER_WORDS or w["end"] - start > MAX_FILLER_TRIM_SEC:
+            break
+        if not _FILLER_WORD.match(w["word"]):
+            break
+        cut = w["end"]
+        removed += 1
+    return cut
+
+
+def _piece_text(sentences: list[dict], i: int, j: int) -> str:
+    return " ".join(sentences[k]["text"] for k in range(i, j + 1))
+
+
+# ---------------------------------------------------------------- разведка
+
+def _scout(model: str, sentences: list[dict], min_sec: float,
+           max_sec: float) -> list[dict]:
+    """Проходит по всему видео окнами и собирает кандидатов."""
+    found = []
+    step = max(CHUNK_SENTENCES - CHUNK_OVERLAP, 1)
+    for lo in range(0, len(sentences), step):
+        hi = min(lo + CHUNK_SENTENCES, len(sentences))
+        if hi - lo < 3:
+            break
+        try:
+            raw = _ollama_chat(model, _scout_prompt(sentences, lo, hi, min_sec, max_sec),
+                               num_predict=250)
+            data = json.loads(raw)
+        except Exception as exc:
+            print(f"  окно {lo}-{hi}: пропущено ({type(exc).__name__})")
+            continue
+        for item in data.get("moments", []):
+            try:
+                i, j = int(item["start_id"]), int(item["end_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (lo <= i <= j < hi):
+                continue
+            found.append({"i": i, "j": j,
+                          "strength": float(item.get("strength") or 5),
+                          "about": str(item.get("about", ""))[:200]})
+        if hi >= len(sentences):
+            break
+    return found
+
+
+def _dedupe(cands: list[dict]) -> list[dict]:
+    """Убирает кандидатов, сильно налезающих друг на друга (перекрытие окон)."""
+    cands.sort(key=lambda c: -c["strength"])
+    kept: list[dict] = []
+    for c in cands:
+        if any(not (c["j"] < k["i"] or c["i"] > k["j"]) for k in kept):
+            continue
+        kept.append(c)
+    return kept
+
+
+# ---------------------------------------------------------------- основное
+
 def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                           min_sec: float, max_sec: float, min_gap_sec: float,
-                          model: str) -> tuple[list[dict], str]:
-    """Возвращает (клипы, движок): движок 'ollama' или 'heuristic'."""
-    fallback = lambda: (pick_highlights(  # noqa: E731
-        transcript, total_duration, count, min_sec, max_sec, min_gap_sec), "heuristic")
+                          model: str, signals=None, cfg: dict | None = None
+                          ) -> tuple[list[dict], str]:
+    """Возвращает (клипы, движок). Клип: {'pieces': [[a,b],...], 'hook', 'score'}."""
+    av = cfg.get("av_signals", {}) if cfg else {}
+
+    def fallback():
+        clips = pick_highlights(transcript, total_duration, count,
+                                min_sec, max_sec, min_gap_sec)
+        for c in clips:
+            c.setdefault("pieces", [[c["start"], c["end"]]])
+        return clips, "heuristic"
 
     sentences = _split_sentences(transcript.get("segments", []))
     if len(sentences) < 3 or not ollama_available(model):
         return fallback()
 
+    words = [w for s in transcript.get("segments", []) for w in s.get("words", [])]
+
     try:
-        raw = _ollama_chat(model, _build_prompt(sentences, count, min_sec, max_sec))
-        data = json.loads(raw)
-        clips = []
-        for item in data.get("clips", []):
-            i, j = int(item["start_id"]), int(item["end_id"])
-            if not (0 <= i <= j < len(sentences)):
-                continue
-            j = _fit_to_limits(sentences, i, j, min_sec, max_sec)
+        raw_cands = _scout(model, sentences, min_sec, max_sec)
+        if not raw_cands:
+            print("  нейросеть не нашла сильных моментов, использую эвристику")
+            return fallback()
+
+        # подгоняем границы кодом — модель свои же правила нарушает
+        prepared = []
+        for c in _dedupe(raw_cands):
+            j = _fit_end(sentences, c["i"], c["j"], min_sec, max_sec)
             if j is None:
                 continue
-            start = max(sentences[i]["start"] - 0.2, 0.0)
-            end = min(sentences[j]["end"] + 0.35, total_duration)
-            dur = end - start
-            if dur < min_sec * 0.6:
+            start = _trim_filler(words, sentences[c["i"]]["start"])
+            end = min(sentences[j]["end"], total_duration)
+            if end - start < min_sec * 0.6:
                 continue
-            # пересечения отбрасываем
-            if any(not (end < c["start"] or start > c["end"]) for c in clips):
+            prepared.append({
+                "i": c["i"], "j": j, "start": round(start, 2), "end": round(end, 2),
+                "duration": end - start, "strength": c["strength"],
+                "text": _piece_text(sentences, c["i"], j),
+                "closed": bool(sentences[j].get("strong")),
+            })
+        if not prepared:
+            return fallback()
+
+        # штрафы и бонусы по картинке и звуку
+        if signals is not None and getattr(signals, "ok", False) and av.get("enabled", True):
+            for c in prepared:
+                frozen = signals.freeze_share(c["start"], c["end"])
+                dark = signals.dark_share(c["start"], c["end"])
+                energy = signals.energy(c["start"], c["end"])
+                # поправку храним отдельно: судья перезапишет оценку, и штраф
+                # за застывший экран иначе бы потерялся
+                c["av_adjust"] = (
+                    - frozen * float(av.get("freeze_penalty", 2.0)) * 5
+                    - dark * float(av.get("dark_penalty", 1.0)) * 2
+                    + max(energy, 0) * float(av.get("energy_bonus", 0.10))
+                )
+                c["strength"] += c["av_adjust"]
+                c["frozen"] = round(frozen, 2)
+            prepared.sort(key=lambda c: -c["strength"])
+
+        # судья сравнивает выживших между собой и придумывает заголовки
+        judged = _judge(model, prepared[:8])
+
+        clips = []
+        for c in judged:
+            if len(clips) >= count:
+                break
+            if any(not (c["end"] + min_gap_sec < k["pieces"][0][0]
+                        or c["start"] > k["pieces"][-1][1] + min_gap_sec) for k in clips):
                 continue
             clips.append({
-                "start": round(start, 2), "end": round(end, 2),
-                "hook": str(item.get("hook", ""))[:120] or sentences[i]["text"][:120],
-                "score": 100.0 - len(clips),  # порядок нейросети = приоритет
+                "pieces": [[c["start"], c["end"]]],
+                "start": c["start"], "end": c["end"],   # для обратной совместимости
+                "hook": c["hook"],
+                "score": round(c["score"], 2),
             })
         if clips:
-            clips = clips[:count]
-            # нейросеть нашла меньше, чем просили — добираем эвристикой
-            if len(clips) < count:
-                extra, _ = fallback()
-                for cand in extra:
-                    if len(clips) >= count:
-                        break
-                    if all(cand["end"] + min_gap_sec < c["start"]
-                           or cand["start"] > c["end"] + min_gap_sec for c in clips):
-                        clips.append(cand)
-                clips.sort(key=lambda c: c["score"], reverse=True)
             return clips, "ollama"
     except Exception as exc:
         print(f"  Ollama не ответила ({type(exc).__name__}), использую эвристику")
     return fallback()
+
+
+def _judge(model: str, cands: list[dict]) -> list[dict]:
+    """Ранжирует кандидатов и даёт заголовки. При сбое — порядок по strength."""
+    for c in cands:
+        c.setdefault("hook", c["text"][:80])
+        c.setdefault("score", c["strength"])
+    if len(cands) < 2:
+        return cands
+    try:
+        raw = _ollama_chat(model, _judge_prompt(cands), num_predict=700)
+        ranking = json.loads(raw).get("ranking", [])
+    except Exception as exc:
+        print(f"  судья не ответил ({type(exc).__name__}), беру порядок разведки")
+        return sorted(cands, key=lambda c: -c["strength"])
+
+    ordered = []
+    for item in ranking:
+        try:
+            idx = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(cands)) or cands[idx] in ordered:
+            continue
+        c = cands[idx]
+        c["score"] = float(item.get("score") or c["strength"])
+        title = str(item.get("title", "")).strip()
+        if title:
+            c["hook"] = title[:120]
+        # незакрытый финал — минус к оценке, такой клип берём в последнюю очередь
+        if not c.get("closed"):
+            c["score"] -= 1.5
+        # возвращаем поправку за картинку и звук: судья видит только текст
+        c["score"] += c.get("av_adjust", 0.0)
+        ordered.append(c)
+    for c in cands:
+        if c not in ordered:
+            ordered.append(c)
+    ordered.sort(key=lambda c: -c["score"])
+    return ordered

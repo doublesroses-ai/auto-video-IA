@@ -28,6 +28,8 @@ DEFAULTS = {
         "font": "Arial Black",
         "vertical_font_size": 84,
         "horizontal_font_size": 56,
+        "burn_in": True,       # вшивать субтитры (для игр с текстом в кадре — false)
+        "show_title": True,    # показывать заголовок первые секунды ролика
     },
     "music": {
         "enabled": True,
@@ -49,6 +51,15 @@ DEFAULTS = {
     },
     "highlights": {
         "ollama_model": "qwen3:8b",
+    },
+    # Имена и термины, которые Whisper иначе слышит как попало.
+    # Подсказка отдаётся распознаванию ДО работы, а не правится потом.
+    "vocabulary": [],
+    "av_signals": {
+        "enabled": True,
+        "freeze_penalty": 2.0,     # штраф за застывший экран
+        "dark_penalty": 1.0,       # штраф за тёмный кадр
+        "energy_bonus": 0.10,      # надбавка за эмоциональную речь
     },
     "render": {
         # потолок битрейта, Мбит/с: держит файлы компактными без видимой потери

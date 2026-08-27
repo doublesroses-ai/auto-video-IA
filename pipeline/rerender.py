@@ -5,11 +5,13 @@ from pathlib import Path
 
 from .config import load_config, OUTPUT_DIR, WORK_DIR, INPUT_DIR
 from .ffmpeg_utils import duration_of, video_size
+from .av_signals import measure
 from .punctuate import restore_punctuation
 from .silence import cut_silences
 from .smart_highlights import pick_highlights_smart
-from .subtitles import build_ass
+from .subtitles import build_ass, build_ass_pieces
 from .render import render_vertical, render_horizontal, pick_music
+from .process import _clip_pieces, _clip_duration, _empty_ass
 
 
 def _log(msg: str) -> None:
@@ -29,6 +31,28 @@ def list_projects() -> list[str]:
 def load_segments(project: str) -> list[dict]:
     data = json.loads((OUTPUT_DIR / project / "transcript.json").read_text(encoding="utf-8"))
     return data["segments"]
+
+
+def load_titles(project: str) -> list[dict]:
+    """Заголовки шортсов проекта: [{'file', 'hook'}]."""
+    meta = json.loads((OUTPUT_DIR / project / "metadata.json").read_text(encoding="utf-8"))
+    return [{"file": s["file"], "hook": s.get("hook", "")} for s in meta.get("shorts", [])]
+
+
+def apply_titles(project: str, new_titles: list[str]) -> Path:
+    """Записывает исправленные заголовки и пересобирает ролики с новым титром."""
+    out_dir = OUTPUT_DIR / project
+    meta = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+    shorts = meta.get("shorts", [])
+    if len(new_titles) != len(shorts):
+        raise ValueError(f"Заголовков {len(new_titles)}, а роликов {len(shorts)}")
+    for s, title in zip(shorts, new_titles):
+        if title:
+            s["hook"] = title[:120]
+    (out_dir / "metadata.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    _log("Заголовки записаны, пересобираю ролики...")
+    return _render_from_meta(project)
 
 
 def _retime_words(segment: dict, new_text: str) -> None:
@@ -95,11 +119,16 @@ def repick_and_render(project: str) -> Path:
         (out_dir / "transcript.json").write_text(
             _json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    signals = None
+    if cfg["av_signals"]["enabled"]:
+        _log("Смотрю, где экран застыл и где всплески эмоций...")
+        signals = measure(str(tight), WORK_DIR / project, total)
+
     sh = cfg["shorts"]
     clips, engine = pick_highlights_smart(
         transcript, total, sh["count"], sh["min_sec"], sh["max_sec"],
-        sh["min_gap_sec"], cfg["highlights"]["ollama_model"])
-    clips = [c for c in clips if c["end"] - c["start"] >= 5]
+        sh["min_gap_sec"], cfg["highlights"]["ollama_model"], signals, cfg)
+    clips = [c for c in clips if _clip_duration(c) >= 5]
     _log(f"Выбрано клипов: {len(clips)} "
          f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")
 
@@ -115,25 +144,29 @@ def repick_and_render(project: str) -> Path:
     music_cfg = cfg["music"]
     new_meta = []
     for i, clip in enumerate(clips, 1):
-        ass_text = build_ass(
-            transcript, clip["start"], clip["end"],
+        pieces = _clip_pieces(clip)
+        ass_text = build_ass_pieces(
+            transcript, pieces,
             vert["width"], vert["height"],
             subs["font"], subs["vertical_font_size"],
             subs["uppercase"], subs["max_words_per_card"],
             bottom_margin_ratio=0.30,
-        )
+        ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
         ass_file = work / f"short_{i:02d}.ass"
         ass_file.write_text(ass_text, encoding="utf-8")
         music = pick_music() if music_cfg["enabled"] else None
         dst = shorts_dir / f"short_{i:02d}.mp4"
-        render_vertical(str(tight), clip["start"], clip["end"], str(ass_file),
+        render_vertical(str(tight), pieces, str(ass_file),
                         str(dst), vert["width"], vert["height"], vert["background"],
-                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"])
-        _log(f"Готов {dst.name} ({clip['end'] - clip['start']:.0f} с, "
+                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"],
+                        title=clip["hook"] if subs["show_title"] else "",
+                        font=subs["font"], work_dir=work)
+        _log(f"Готов {dst.name} ({_clip_duration(clip):.0f} с, "
              f"{dst.stat().st_size / 1024 / 1024:.0f} МБ)")
         new_meta.append({
             "file": f"shorts/{dst.name}",
-            "start_sec": clip["start"], "end_sec": clip["end"],
+            "pieces": pieces,
+            "start_sec": pieces[0][0], "end_sec": pieces[-1][1],
             "hook": clip["hook"], "score": clip["score"],
         })
 
@@ -167,31 +200,49 @@ def apply_corrections(project: str, new_texts: list[str]) -> Path:
     (out_dir / "transcript.json").write_text(
         json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    return _render_from_meta(project, with_youtube=True)
+
+
+def _render_from_meta(project: str, with_youtube: bool = False) -> Path:
+    """Пересобирает ролики проекта по тому, что уже записано в metadata.json.
+
+    Моменты не выбираются заново — берутся прежние куски. Так работает и правка
+    субтитров, и правка заголовков.
+    """
+    cfg = load_config()
+    out_dir = OUTPUT_DIR / project
+    transcript = json.loads((out_dir / "transcript.json").read_text(encoding="utf-8"))
+    meta = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+
     tight = _ensure_tight(project, meta, cfg)
     work = WORK_DIR / project
+    work.mkdir(parents=True, exist_ok=True)
     subs = cfg["subtitles"]
     vert = cfg["vertical"]
     music_cfg = cfg["music"]
 
     for i, clip in enumerate(meta.get("shorts", []), 1):
-        _log(f"Перерендериваю shorts/short_{i:02d}.mp4...")
-        ass_text = build_ass(
-            transcript, clip["start_sec"], clip["end_sec"],
+        _log(f"Пересобираю {clip['file']}...")
+        pieces = _clip_pieces(clip)
+        ass_text = build_ass_pieces(
+            transcript, pieces,
             vert["width"], vert["height"],
             subs["font"], subs["vertical_font_size"],
             subs["uppercase"], subs["max_words_per_card"],
             bottom_margin_ratio=0.30,
-        )
+        ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
         ass_file = work / f"short_{i:02d}.ass"
         ass_file.write_text(ass_text, encoding="utf-8")
         music = pick_music() if music_cfg["enabled"] else None
-        render_vertical(str(tight), clip["start_sec"], clip["end_sec"], str(ass_file),
+        render_vertical(str(tight), pieces, str(ass_file),
                         str(out_dir / clip["file"]), vert["width"], vert["height"],
                         vert["background"], music, music_cfg["volume"],
-                        cfg["render"]["shorts_max_mbps"])
+                        cfg["render"]["shorts_max_mbps"],
+                        title=clip.get("hook", "") if subs["show_title"] else "",
+                        font=subs["font"], work_dir=work)
 
-    if cfg["render_youtube_version"]:
-        _log("Перерендериваю полную версию 16:9...")
+    if with_youtube and cfg["render_youtube_version"]:
+        _log("Пересобираю полную версию 16:9...")
         total = duration_of(str(tight))
         w, h = video_size(str(tight))
         ass_text = build_ass(
@@ -205,5 +256,5 @@ def apply_corrections(project: str, new_texts: list[str]) -> Path:
                           str(out_dir / f"{project}_youtube.mp4"),
                           cfg["render"]["youtube_max_mbps"])
 
-    _log(f"=== Перерендер завершён → {out_dir} ===")
+    _log(f"=== Готово → {out_dir} ===")
     return out_dir

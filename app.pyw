@@ -111,20 +111,28 @@ class App(tk.Tk):
         self.tts_btn.pack(anchor="w", padx=self.px(10), pady=(self.px(2), self.px(10)))
 
         tab3 = ttk.Frame(nb)
-        nb.add(tab3, text="  Исправить субтитры  ")
-        ttk.Label(tab3, text="Выбери готовый проект, поправь ошибки распознавания —\n"
-                             "и ролики перерендерятся с исправленным текстом."
+        nb.add(tab3, text="  Готовые проекты  ")
+        ttk.Label(tab3, text="Поправить заголовки, которые придумала нейросеть,\n"
+                             "исправить ошибки распознавания или заново выбрать моменты."
                   ).pack(anchor="w", padx=self.px(10), pady=self.px(8))
         row3 = ttk.Frame(tab3)
-        row3.pack(fill="x", padx=self.px(10), pady=(self.px(0), self.px(10)))
+        row3.pack(fill="x", padx=self.px(10), pady=(self.px(0), self.px(6)))
         self.project_var = tk.StringVar()
         self.project_combo = ttk.Combobox(row3, textvariable=self.project_var,
                                           state="readonly", width=40)
         self.project_combo.pack(side="left")
         ttk.Button(row3, text="Обновить список", command=self.refresh_projects
                    ).pack(side="left", padx=self.px(6))
-        self.edit_btn = ttk.Button(row3, text="Открыть редактор…", command=self.open_editor)
+        row3b = ttk.Frame(tab3)
+        row3b.pack(fill="x", padx=self.px(10), pady=(0, self.px(10)))
+        self.title_btn = ttk.Button(row3b, text="Заголовки роликов…",
+                                    command=self.open_titles)
+        self.title_btn.pack(side="left")
+        self.edit_btn = ttk.Button(row3b, text="Субтитры…", command=self.open_editor)
         self.edit_btn.pack(side="left", padx=self.px(6))
+        self.repick_btn = ttk.Button(row3b, text="Выбрать моменты заново",
+                                     command=self.repick)
+        self.repick_btn.pack(side="left")
 
         # --- Статус и лог ---
         self.progress = ttk.Progressbar(self, mode="indeterminate")
@@ -198,7 +206,8 @@ class App(tk.Tk):
 
     def _set_busy_ui(self, busy: bool):
         state = "disabled" if busy else "normal"
-        for btn in (self.video_btn, self.tts_btn, self.edit_btn):
+        for btn in (self.video_btn, self.tts_btn, self.edit_btn,
+                    self.title_btn, self.repick_btn):
             btn.config(state=state)
         if busy:
             self.status_label.config(text="Работаю… ход обработки — в журнале ниже")
@@ -282,10 +291,70 @@ class App(tk.Tk):
         if projects and not self.project_var.get():
             self.project_var.set(projects[0])
 
-    def open_editor(self):
+    def _current_project(self) -> str | None:
         project = self.project_var.get()
         if not project:
             messagebox.showwarning("Нет проекта", "Сначала выбери проект из списка.")
+            return None
+        return project
+
+    def repick(self):
+        project = self._current_project()
+        if not project:
+            return
+        if not messagebox.askyesno(
+                "Выбрать моменты заново",
+                "Нейросеть заново просмотрит всё видео и соберёт новые шортсы.\n"
+                "Прежние ролики этого проекта будут заменены.\n\nПродолжить?"):
+            return
+        from pipeline.rerender import repick_and_render
+        self._run_in_thread(lambda: repick_and_render(project),
+                            f"Моменты выбраны заново: {project}")
+
+    def open_titles(self):
+        """Правка заголовков перед тем, как вшить их в кадр."""
+        project = self._current_project()
+        if not project:
+            return
+        from pipeline.rerender import load_titles, apply_titles
+        try:
+            titles = load_titles(project)
+        except Exception as exc:
+            messagebox.showerror("Не вышло", str(exc))
+            return
+        if not titles:
+            messagebox.showinfo("Пусто", "У этого проекта нет шортсов с заголовками.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Заголовки: {project}")
+        win.geometry(f"{self.px(660)}x{self.px(120 + 60 * len(titles))}")
+        ttk.Label(win, wraplength=self.px(620), justify="left",
+                  text="Эти заголовки нейросеть придумала сама — она нередко ошибается "
+                       "в падежах. Поправь, и ролики пересоберутся с исправленным титром."
+                  ).pack(anchor="w", padx=self.px(12), pady=self.px(10))
+        entries = []
+        for item in titles:
+            row = ttk.Frame(win)
+            row.pack(fill="x", padx=self.px(12), pady=self.px(4))
+            ttk.Label(row, text=item["file"].split("/")[-1], width=16
+                      ).pack(side="left")
+            var = tk.StringVar(value=item["hook"])
+            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+            entries.append(var)
+
+        def apply():
+            new = [v.get().strip() for v in entries]
+            win.destroy()
+            self._run_in_thread(lambda: apply_titles(project, new),
+                                f"Заголовки обновлены, ролики пересобраны: {project}")
+
+        ttk.Button(win, text="Применить и пересобрать ролики", command=apply
+                   ).pack(anchor="e", padx=self.px(12), pady=self.px(10))
+
+    def open_editor(self):
+        project = self._current_project()
+        if not project:
             return
         from pipeline.rerender import load_segments
         segments = load_segments(project)

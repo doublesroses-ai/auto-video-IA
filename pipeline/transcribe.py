@@ -33,14 +33,15 @@ def extract_audio(src: str, wav_path: str) -> None:
          "-c:a", "pcm_s16le", str(wav_path)], desc="извлечение звука")
 
 
-def _run_whisper(wav: str, model_name: str, device: str, language: str | None) -> dict:
+def _run_whisper(wav: str, model_name: str, device: str, language: str | None,
+                 hint: str | None = None) -> dict:
     from faster_whisper import WhisperModel
 
     compute = "float16" if device == "cuda" else "int8"
     model = WhisperModel(_pick_model(model_name, device), device=device, compute_type=compute)
     segments_iter, info = model.transcribe(
         str(wav), language=language, word_timestamps=True,
-        vad_filter=True, beam_size=5,
+        vad_filter=True, beam_size=5, initial_prompt=hint,
     )
     segments = []
     # ошибки CUDA всплывают при итерации, поэтому список собираем здесь же
@@ -61,19 +62,24 @@ def _run_whisper(wav: str, model_name: str, device: str, language: str | None) -
 
 
 def transcribe(src: str, work_dir: Path, model_name: str = "auto",
-               language: str = "auto") -> dict:
+               language: str = "auto", vocabulary: list | None = None) -> dict:
     """Возвращает {'language': ..., 'segments': [{start, end, text, words: [...]}]}."""
     wav = work_dir / "audio16k.wav"
     extract_audio(src, wav)
     lang = None if language in ("auto", "", None) else language
+    # Подсказка распознаванию: имена и термины, которые оно иначе слышит
+    # как попало. Действует на входе, а не заменой в готовом тексте.
+    hint = ", ".join(str(v) for v in vocabulary if str(v).strip()) if vocabulary else None
+    if hint:
+        print(f"  подсказка распознаванию: {hint[:70]}")
 
     _add_cuda_dll_dirs()
     try:
-        result = _run_whisper(str(wav), model_name, "cuda", lang)
+        result = _run_whisper(str(wav), model_name, "cuda", lang, hint)
         print("  Whisper отработал на GPU (CUDA)")
     except Exception as exc:
         print(f"  CUDA недоступна ({type(exc).__name__}: {str(exc)[:120]}), распознаю на CPU...")
-        result = _run_whisper(str(wav), model_name, "cpu", lang)
+        result = _run_whisper(str(wav), model_name, "cpu", lang, hint)
 
     (work_dir / "transcript.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8"

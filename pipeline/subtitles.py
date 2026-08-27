@@ -1,4 +1,10 @@
-"""Генерация стильных ASS-субтитров с подсветкой произносимого слова."""
+"""Генерация стильных ASS-субтитров с подсветкой произносимого слова.
+
+Ролик может быть склеен из нескольких кусков исходника, поэтому время каждого
+слова пересчитывается: слово из куска k сдвигается на сумму длительностей
+предыдущих кусков. Карточка субтитров никогда не пересекает шов — иначе
+на склейке текст поедет.
+"""
 
 
 def _ass_time(t: float) -> str:
@@ -13,30 +19,44 @@ def _clean(word: str) -> str:
     return word.replace("{", "").replace("}", "").strip()
 
 
-def _collect_words(transcript: dict, clip_start: float, clip_end: float) -> list[dict]:
-    """Слова в границах клипа со сдвигом времени к нулю."""
+def _collect_words(transcript: dict, pieces: list[list[float]]) -> list[dict]:
+    """Слова, целиком попавшие в куски, с пересчётом времени под готовый ролик.
+
+    Берём только слова, которые помещаются в кусок ЦЕЛИКОМ. Раньше захватывались
+    и задетые краем — из-за этого в конце каждого ролика вспыхивало обрубленное
+    слово на треть секунды.
+    """
     words = []
-    for seg in transcript.get("segments", []):
-        for w in seg.get("words", []):
-            if w["end"] <= clip_start or w["start"] >= clip_end:
-                continue
-            words.append({
-                "start": max(w["start"] - clip_start, 0.0),
-                "end": min(w["end"], clip_end) - clip_start,
-                "word": _clean(w["word"]),
-            })
-    return [w for w in words if w["word"] and w["end"] > w["start"]]
+    offset = 0.0
+    for pi, (a, b) in enumerate(pieces):
+        for seg in transcript.get("segments", []):
+            for w in seg.get("words", []):
+                if w["start"] < a or w["end"] > b:
+                    continue
+                text = _clean(w["word"])
+                if not text or w["end"] <= w["start"]:
+                    continue
+                words.append({
+                    "start": w["start"] - a + offset,
+                    "end": w["end"] - a + offset,
+                    "word": text,
+                    "piece": pi,
+                })
+        offset += b - a
+    words.sort(key=lambda w: w["start"])
+    return words
 
 
 def _group_cards(words: list[dict], max_words: int) -> list[list[dict]]:
-    """Разбивает слова на карточки: не более max_words, разрыв при длинной паузе."""
+    """Разбивает слова на карточки: не более max_words, разрыв при паузе и на шве."""
     cards: list[list[dict]] = []
     current: list[dict] = []
     for w in words:
         if current:
             gap = w["start"] - current[-1]["end"]
             ends_sentence = current[-1]["word"][-1:] in ".!?…"
-            if len(current) >= max_words or gap > 0.7 or ends_sentence:
+            crosses_seam = w["piece"] != current[-1]["piece"]
+            if len(current) >= max_words or gap > 0.7 or ends_sentence or crosses_seam:
                 cards.append(current)
                 current = []
         current.append(w)
@@ -45,11 +65,12 @@ def _group_cards(words: list[dict], max_words: int) -> list[list[dict]]:
     return cards
 
 
-def build_ass(transcript: dict, clip_start: float, clip_end: float,
-              play_w: int, play_h: int, font: str, font_size: int,
-              uppercase: bool, max_words: int, bottom_margin_ratio: float) -> str:
-    """Возвращает содержимое .ass файла для клипа [clip_start, clip_end]."""
-    words = _collect_words(transcript, clip_start, clip_end)
+def build_ass_pieces(transcript: dict, pieces: list[list[float]],
+                     play_w: int, play_h: int, font: str, font_size: int,
+                     uppercase: bool, max_words: int,
+                     bottom_margin_ratio: float) -> str:
+    """Содержимое .ass для ролика, склеенного из перечисленных кусков."""
+    words = _collect_words(transcript, pieces)
     cards = _group_cards(words, max_words)
 
     margin_v = int(play_h * bottom_margin_ratio)
@@ -72,17 +93,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lines = []
     for card in cards:
         start = card[0]["start"]
-        end = max(card[-1]["end"], start + 0.35)
+        end = card[-1]["end"]
+        if end <= start:
+            continue
         parts = []
         cursor = start
         for w in card:
-            # \k длится в сотых секунды от конца предыдущего слова
             dur_cs = max(int(round((w["end"] - cursor) * 100)), 1)
             cursor = w["end"]
             text = w["word"].upper() if uppercase else w["word"]
             parts.append(f"{{\\k{dur_cs}}}{text}")
-        line = " ".join(parts)
         lines.append(
-            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Cap,,0,0,0,,{line}"
+            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Cap,,0,0,0,,{' '.join(parts)}"
         )
     return header + "\n".join(lines) + "\n"
+
+
+def build_ass(transcript: dict, clip_start: float, clip_end: float,
+              play_w: int, play_h: int, font: str, font_size: int,
+              uppercase: bool, max_words: int, bottom_margin_ratio: float) -> str:
+    """Содержимое .ass для непрерывного отрезка [clip_start, clip_end]."""
+    return build_ass_pieces(transcript, [[clip_start, clip_end]], play_w, play_h,
+                            font, font_size, uppercase, max_words, bottom_margin_ratio)

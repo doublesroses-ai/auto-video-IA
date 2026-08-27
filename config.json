@@ -1,56 +1,65 @@
 {
   "language": "auto",
   "whisper_model": "auto",
-
   "silence": {
     "enabled": true,
     "noise_db": -32,
     "min_silence_sec": 0.45,
     "pad_sec": 0.12
   },
-
   "shorts": {
     "count": 3,
     "min_sec": 25,
     "max_sec": 60,
     "min_gap_sec": 30
   },
-
   "subtitles": {
     "uppercase": true,
     "max_words_per_card": 3,
     "font": "Arial Black",
     "vertical_font_size": 84,
-    "horizontal_font_size": 56
+    "horizontal_font_size": 56,
+    "burn_in": true,
+    "show_title": true
   },
-
   "music": {
     "enabled": true,
     "volume": 0.16
   },
-
   "vertical": {
     "width": 1080,
     "height": 1920,
     "background": "blur"
   },
-
   "render_youtube_version": true,
   "keep_work_files": true,
-
   "tts": {
     "voice": "ru-RU-SvetlanaNeural",
     "rate": "+0%"
   },
-
   "punctuation": {
     "enabled": true
   },
-
   "highlights": {
     "ollama_model": "qwen3:8b"
   },
-
+  "vocabulary": [
+    "Factorio",
+    "Наувис",
+    "Вулкан",
+    "Глеба",
+    "Фульгора",
+    "Аквило",
+    "Онилл",
+    "рельсотрон",
+    "термоядерный синтез"
+  ],
+  "av_signals": {
+    "enabled": true,
+    "freeze_penalty": 2.0,
+    "dark_penalty": 1.0,
+    "energy_bonus": 0.1
+  },
   "render": {
     "shorts_max_mbps": 8,
     "youtube_max_mbps": 12,
