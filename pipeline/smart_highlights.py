@@ -173,19 +173,13 @@ def _judge_prompt(candidates: list[dict]) -> str:
 Слабый: перечисление, комментарий к картинке, обрыв на полуслове, много отсылок
 к тому, чего зритель не видел.
 
-Для каждого укажи оценку 1..10 и придумай заголовок до 8 слов.
-
-Заголовок — это НЕ цитата и не первые слова расшифровки, а короткая фраза
-о том, ЧТО в ролике происходит, — как подпись под видео в ленте.
-Грамотный русский, без выдуманных подробностей.
-  плохо: «Желтые глаза. Ладно, красным отказать»
-  хорошо: «Не пустил жильца из-за подделки»
+Для каждого поставь оценку 1..10.
 
 Если несколько кандидатов про ОДНО И ТО ЖЕ, высокую оценку дай только лучшему
 из них: подборка из похожих роликов зрителю неинтересна.
 
 Ответь строго JSON:
-{{"ranking":[{{"id":0,"score":9,"title":"заголовок"}}]}}
+{{"ranking":[{{"id":0,"score":9}}]}}
 
 Кандидаты:
 {listing}
@@ -240,29 +234,100 @@ _FRAGMENT_START = {
 }
 
 
+# Окончания, по которым узнаём глагол. Намеренно без «ю», «у», «им», «ем»:
+# на них кончается уйма существительных («продуктивностью», «модулем»),
+# и фраза-перечисление ошибочно выглядела бы осмысленной.
+_VERB_TAIL = re.compile(
+    r"(ть|ться|ешь|ёшь|ете|ёте|ет|ёт|ут|ют|ат|ят|ил|ила|ило|или|"
+    r"ал|ала|ало|али|ул|ула|уло|ули|ся|сь|ю́)$", re.IGNORECASE)
+_FIRST_PERSON = {"я", "мы", "меня", "мне", "нас", "нам", "мой", "моя", "моё", "наш",
+                 "мои", "нашей", "моего"}
+# Слово-затравка перечисления: голое существительное или наречие с запятой сразу
+_LIST_OPENER = re.compile(r"^\W*[\w-]+\s*,", re.UNICODE)
+
+
+def _opening_score(sentence: dict) -> float:
+    """Насколько фраза годится в НАЧАЛО ролика. 0 — вяло, 10 — отлично.
+
+    Главная беда — перечисления: «Площадка, космодром, энергия, энергетическая
+    база». Формально это законченная фраза, но зритель не понимает, к чему это,
+    и листает дальше. Отличаются они запятыми при полном отсутствии глаголов.
+    """
+    text = sentence.get("text", "")
+    words = re.findall(r"[\w-]+", text.lower())
+    if not words:
+        return 0.0
+
+    score = 5.0
+    commas = text.count(",")
+    verbs = sum(1 for w in words if len(w) > 3 and _VERB_TAIL.search(w))
+
+    # перечисление: много запятых и почти нет глаголов
+    if commas >= 2 and verbs <= 1 and commas / len(words) > 0.18:
+        score -= 4.0
+    elif commas / max(len(words), 1) > 0.3:
+        score -= 2.0
+
+    if verbs == 0:
+        score -= 2.0
+    # «Много, уголь...», «Площадка, космодром...» — первое же слово с запятой
+    # почти всегда открывает перечень
+    if _LIST_OPENER.match(text) and verbs <= 1:
+        score -= 2.5
+    if _starts_mid_thought(sentence):
+        score -= 3.0
+    # первое лицо ищем в начале фразы, а не строго первым словом:
+    # «У меня 5000 пакетов» — такое же личное заявление, как «Я разочарован»
+    if set(words[:3]) & _FIRST_PERSON:
+        score += 2.0
+    if "не" in words[:6]:
+        score += 1.0          # отрицание почти всегда заявление
+    if re.search(r"[?!]", text):
+        score += 1.5
+    if len(words) < 4:
+        score -= 1.5
+    return max(0.0, min(score, 10.0))
+
+
 def _starts_mid_thought(sentence: dict) -> bool:
     words = re.findall(r"[\w-]+", sentence.get("text", "").lower())
     return bool(words) and words[0] in _FRAGMENT_START
 
 
-def _fix_start(sentences: list[dict], i: int, j: int, min_sec: float) -> int:
-    """Сдвигает начало клипа с середины мысли на нормальное начало фразы.
+WEAK_OPENING = 4.5        # ниже этого ищем начало получше
 
-    Хорошее начало — это фраза, перед которой мысль была закончена. Если
-    первая фраза клипа начинается с союза или слова-отсылки («что», «тоже»,
-    «а»), зритель слышит обрубок и не понимает, к чему это.
+
+def _fix_start(sentences: list[dict], i: int, j: int,
+               min_sec: float, max_sec: float) -> tuple[int, int]:
+    """Ищет лучшее начало клипа. Возвращает (начало, конец).
+
+    Если первая фраза вялая — перечисление или середина мысли, — ищем среди
+    ближайших фразу, с которой ролик зазвучит, и одновременно отодвигаем конец,
+    чтобы клип не стал короче нужного. Без удлинения сдвиг был бесполезен:
+    у клипа в 28 секунд следующая приличная фраза начиналась на одиннадцатой,
+    и после сдвига оставалось 17 секунд — меньше минимума.
     """
-    for step in range(3):
+    if _opening_score(sentences[i]) >= WEAK_OPENING and not _starts_mid_thought(sentences[i]):
+        return i, j
+
+    best = (i, j, _opening_score(sentences[i]))
+    for step in range(1, 9):
         k = i + step
         if k >= j:
             break
-        previous_closed = k == 0 or sentences[k - 1].get("strong")
-        if previous_closed and not _starts_mid_thought(sentences[k]):
-            return k
-        # сдвигаться дальше можно, только если клип не станет короче нужного
-        if sentences[j]["end"] - sentences[k + 1]["start"] < min_sec * 0.8:
-            break
-    return i
+        score = _opening_score(sentences[k])
+        if score <= best[2]:
+            continue
+        # добираем конец, чтобы удержать длительность
+        end = j
+        while end + 1 < len(sentences) and \
+                sentences[end]["end"] - sentences[k]["start"] < min_sec:
+            if sentences[end + 1]["end"] - sentences[k]["start"] > max_sec:
+                break
+            end += 1
+        if sentences[end]["end"] - sentences[k]["start"] >= min_sec * 0.9:
+            best = (k, end, score)
+    return best[0], best[1]
 
 
 def _trim_filler(words: list[dict], start: float) -> float:
@@ -406,6 +471,13 @@ def _pick_by_storylines(model: str, cands: list[dict], max_count: int,
 
 
 MAX_TITLE_CHARS = 38      # длиннее не помещается в две строки титра
+# Описание от разведки часто звучит как «Автор выражает разочарование в том, что…»
+# или «Исследователь рассказывает про…». Опознаём не подлежащее — их бесконечно
+# много, — а глагол речи: всё до него и есть служебная обёртка.
+_NARRATOR_HEAD = re.compile(
+    r"^\W*\w+\s+(?:выража|рассказ|объясн|показ|говор|сообща|отмеча|описыва|"
+    r"делит|обсужда|размышля|комментиру|упомина)\w*\s*"
+    r"(?:о\s+том,?|об\s+этом,?|о|об|про|что|как)?\s*[,:]?\s*", re.IGNORECASE)
 
 # Эталоны стиля для запроса. Маленькая модель охотно списывает примеры дословно,
 # поэтому они же служат чёрным списком: такое название в ролик не попадёт.
@@ -698,7 +770,7 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
             j = _fit_end(sentences, c["i"], c["j"], min_sec, max_sec)
             if j is None:
                 continue
-            begin = _fix_start(sentences, c["i"], j, min_sec)
+            begin, j = _fix_start(sentences, c["i"], j, min_sec, max_sec)
             start = _trim_filler(words, sentences[begin]["start"])
             end = min(sentences[j]["end"], total_duration)
             if end - start < min_sec * 0.6:
@@ -709,9 +781,15 @@ def pick_highlights_smart(transcript: dict, total_duration: float, count: int,
                 "text": _piece_text(sentences, begin, j),
                 "about": c.get("about", ""),
                 "closed": bool(sentences[j].get("strong")),
+                "opening": _opening_score(sentences[begin]),
             })
         if not prepared:
             return fallback()
+
+        # вялое начало — минус к силе кандидата: чинить его нечем, если
+        # ролик целиком стоит на перечислении
+        for c in prepared:
+            c["strength"] += (c["opening"] - 5.0) * 1.0
 
         # штрафы и бонусы по картинке и звуку
         if signals is not None and getattr(signals, "ok", False) and av.get("enabled", True):
@@ -784,7 +862,12 @@ def _fallback_title(c: dict) -> str:
     text = (c.get("about") or c.get("text") or "").strip()
     if not text:
         return "Момент"
+    # описания от разведки часто начинаются с «Автор рассказывает о...» —
+    # в заголовок такое пускать нельзя, срезаем служебное начало
+    text = _NARRATOR_HEAD.sub("", text).strip()
     text = text.rstrip(" .").strip()
+    if not text:
+        return "Момент"
     # длинное описание сокращаем до первой части — она обычно и есть суть
     for sep in (", но ", ", а ", ", и ", ", "):
         head = text.split(sep)[0]
@@ -806,7 +889,12 @@ def _fallback_title(c: dict) -> str:
 
 
 def _judge(model: str, cands: list[dict]) -> list[dict]:
-    """Ранжирует кандидатов и даёт заголовки. При сбое — порядок по strength."""
+    """Ранжирует кандидатов по силе. Заголовки даёт _make_titles.
+
+    Раньше судья заодно придумывал названия, и однажды списал пример прямо
+    из промпта: ролик про Factorio получил заголовок «Не пустил жильца
+    из-за подделки». Названия теперь делает только тот, чья это работа.
+    """
     for c in cands:
         c.setdefault("hook", _fallback_title(c))
         c.setdefault("score", c["strength"])
@@ -829,9 +917,6 @@ def _judge(model: str, cands: list[dict]) -> list[dict]:
             continue
         c = cands[idx]
         c["score"] = float(item.get("score") or c["strength"])
-        title = str(item.get("title", "")).strip()
-        if title:
-            c["hook"] = title[:120]
         # незакрытый финал — минус к оценке, такой клип берём в последнюю очередь
         if not c.get("closed"):
             c["score"] -= 1.5
