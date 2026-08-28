@@ -38,7 +38,15 @@ def _run_whisper(wav: str, model_name: str, device: str, language: str | None,
     from faster_whisper import WhisperModel
 
     compute = "float16" if device == "cuda" else "int8"
-    model = WhisperModel(_pick_model(model_name, device), device=device, compute_type=compute)
+    name = _pick_model(model_name, device)
+    try:
+        model = WhisperModel(name, device=device, compute_type=compute)
+    except Exception:
+        # Без интернета загрузчик пытается достучаться до сервера моделей
+        # и падает, хотя модель уже лежит в кэше. Берём её оттуда напрямую.
+        model = WhisperModel(name, device=device, compute_type=compute,
+                             local_files_only=True)
+        print("  сети нет, модель распознавания взята из кэша")
     segments_iter, info = model.transcribe(
         str(wav), language=language, word_timestamps=True,
         vad_filter=True, beam_size=5, initial_prompt=hint,
