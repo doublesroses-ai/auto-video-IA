@@ -3,15 +3,14 @@ import json
 import time
 from pathlib import Path
 
-from .config import load_config, shorts_count, OUTPUT_DIR, WORK_DIR, INPUT_DIR
+from .config import load_config, shorts_count, OUTPUT_DIR, WORK_DIR
 from .ffmpeg_utils import duration_of, video_size
 from .av_signals import measure
 from .punctuate import restore_punctuation
-from .silence import cut_silences
 from .smart_highlights import pick_highlights_smart
-from .subtitles import build_ass, build_ass_pieces
-from .render import render_vertical, render_horizontal, pick_music
-from .process import _clip_pieces, _clip_duration, _empty_ass
+from .subtitles import build_ass
+from .render import render_horizontal
+from .shorts import render_short, _clip_pieces, _clip_duration, _ensure_tight
 
 
 def _log(msg: str) -> None:
@@ -80,30 +79,6 @@ def _retime_words(segment: dict, new_text: str) -> None:
     segment["text"] = new_text.strip()
 
 
-def _ensure_tight(project: str, meta: dict, cfg: dict) -> Path:
-    """Возвращает смонтированное видео без пауз, при необходимости пересобирает."""
-    work = WORK_DIR / project
-    tight = work / "tight.mp4"
-    if tight.exists():
-        return tight
-    source = INPUT_DIR / "done" / meta["source"]
-    if not source.exists():
-        raise RuntimeError(
-            f"Нет ни рабочего файла work/{project}/tight.mp4, ни исходника "
-            f"input/done/{meta['source']} — перерендерить не из чего."
-        )
-    _log("Рабочий файл не найден, заново вырезаю паузы из исходника...")
-    work.mkdir(parents=True, exist_ok=True)
-    sil = cfg["silence"]
-    if sil["enabled"]:
-        cut_silences(str(source), str(tight), work,
-                     sil["noise_db"], sil["min_silence_sec"], sil["pad_sec"])
-    else:
-        import shutil
-        shutil.copy2(source, tight)
-    return tight
-
-
 def repick_and_render(project: str) -> Path:
     """Заново выбирает моменты по готовой расшифровке и перерендеривает шортсы."""
     import json as _json
@@ -133,44 +108,27 @@ def repick_and_render(project: str) -> Path:
     _log(f"Выбрано клипов: {len(clips)} "
          f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")
 
-    # старые шортсы убираем, чтобы не осталось лишних файлов
+    # старые шортсы убираем, чтобы не осталось лишних файлов; диктор и правки
+    # были привязаны к прежним моментам, с новыми им делать нечего
     shorts_dir = out_dir / "shorts"
-    for old in shorts_dir.glob("short_*.mp4"):
-        old.unlink(missing_ok=True)
-
     work = WORK_DIR / project
     work.mkdir(parents=True, exist_ok=True)
-    subs = cfg["subtitles"]
-    vert = cfg["vertical"]
-    music_cfg = cfg["music"]
+    for old in list(shorts_dir.glob("short_*.mp4")) + list(work.glob("short_*.clean.mp4")):
+        old.unlink(missing_ok=True)
+
     new_meta = []
     for i, clip in enumerate(clips, 1):
         pieces = _clip_pieces(clip)
-        ass_text = build_ass_pieces(
-            transcript, pieces,
-            vert["width"], vert["height"],
-            subs["font"], subs["vertical_font_size"],
-            subs["uppercase"], subs["max_words_per_card"],
-            bottom_margin_ratio=0.30,
-            title=clip.get("hook", "") if subs["show_title"] else "",
-        ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
-        ass_file = work / f"short_{i:02d}.ass"
-        ass_file.write_text(ass_text, encoding="utf-8")
-        music = pick_music() if music_cfg["enabled"] else None
-        dst = shorts_dir / f"short_{i:02d}.mp4"
-        render_vertical(str(tight), pieces, str(ass_file),
-                        str(dst), vert["width"], vert["height"], vert["background"],
-                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"],
-                        title=clip["hook"] if subs["show_title"] else "",
-                        font=subs["font"], work_dir=work)
-        _log(f"Готов {dst.name} ({_clip_duration(clip):.0f} с, "
-             f"{dst.stat().st_size / 1024 / 1024:.0f} МБ)")
-        new_meta.append({
-            "file": f"shorts/{dst.name}",
+        entry = {
+            "file": f"shorts/short_{i:02d}.mp4",
             "pieces": pieces,
             "start_sec": pieces[0][0], "end_sec": pieces[-1][1],
             "hook": clip["hook"], "score": clip["score"],
-        })
+        }
+        dst = render_short(tight, transcript, entry, i, cfg, work, out_dir)
+        _log(f"Готов {dst.name} ({_clip_duration(clip):.0f} с, "
+             f"{dst.stat().st_size / 1024 / 1024:.0f} МБ)")
+        new_meta.append(entry)
 
     meta["shorts"] = new_meta
     (out_dir / "metadata.json").write_text(
@@ -220,29 +178,10 @@ def _render_from_meta(project: str, with_youtube: bool = False) -> Path:
     work = WORK_DIR / project
     work.mkdir(parents=True, exist_ok=True)
     subs = cfg["subtitles"]
-    vert = cfg["vertical"]
-    music_cfg = cfg["music"]
 
     for i, clip in enumerate(meta.get("shorts", []), 1):
         _log(f"Пересобираю {clip['file']}...")
-        pieces = _clip_pieces(clip)
-        ass_text = build_ass_pieces(
-            transcript, pieces,
-            vert["width"], vert["height"],
-            subs["font"], subs["vertical_font_size"],
-            subs["uppercase"], subs["max_words_per_card"],
-            bottom_margin_ratio=0.30,
-            title=clip.get("hook", "") if subs["show_title"] else "",
-        ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
-        ass_file = work / f"short_{i:02d}.ass"
-        ass_file.write_text(ass_text, encoding="utf-8")
-        music = pick_music() if music_cfg["enabled"] else None
-        render_vertical(str(tight), pieces, str(ass_file),
-                        str(out_dir / clip["file"]), vert["width"], vert["height"],
-                        vert["background"], music, music_cfg["volume"],
-                        cfg["render"]["shorts_max_mbps"],
-                        title=clip.get("hook", "") if subs["show_title"] else "",
-                        font=subs["font"], work_dir=work)
+        render_short(tight, transcript, clip, i, cfg, work, out_dir)
 
     if with_youtube and cfg["render_youtube_version"]:
         _log("Пересобираю полную версию 16:9...")

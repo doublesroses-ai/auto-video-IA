@@ -11,31 +11,13 @@ from .transcribe import transcribe
 from .av_signals import measure
 from .punctuate import restore_punctuation
 from .smart_highlights import pick_highlights_smart
-from .subtitles import build_ass, build_ass_pieces
-from .render import render_vertical, render_horizontal, pick_music
+from .subtitles import build_ass
+from .render import render_horizontal
+from .shorts import render_short, _clip_pieces, _clip_duration, _empty_ass  # noqa: F401
 
 
 def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-
-def _clip_pieces(clip: dict) -> list[list[float]]:
-    """Куски клипа. Старые записи без 'pieces' читаются как один кусок."""
-    pieces = clip.get("pieces")
-    if pieces:
-        return [[float(a), float(b)] for a, b in pieces]
-    return [[float(clip["start"]), float(clip["end"])]]
-
-
-def _clip_duration(clip: dict) -> float:
-    return sum(b - a for a, b in _clip_pieces(clip))
-
-
-def _empty_ass(play_w: int, play_h: int) -> str:
-    """Пустой файл субтитров: нужен, когда вшивание выключено, чтобы не менять граф."""
-    return (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {play_w}\n"
-            f"PlayResY: {play_h}\n\n[Events]\n"
-            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
 
 def process_video(src: str | Path, config: dict | None = None) -> Path:
@@ -108,42 +90,23 @@ def process_video(src: str | Path, config: dict | None = None) -> Path:
          f"({'нейросеть Ollama' if engine == 'ollama' else 'эвристика'})")
 
     subs = cfg["subtitles"]
-    vert = cfg["vertical"]
-    music_cfg = cfg["music"]
-    show_title = cfg["subtitles"]["show_title"]
 
     # 5. Рендерим шортсы
     _log("Шаг 5/6: рендерю шортсы 9:16...")
     meta = []
     for i, clip in enumerate(clips, 1):
         pieces = _clip_pieces(clip)
-        ass_text = build_ass_pieces(
-            transcript, pieces,
-            vert["width"], vert["height"],
-            subs["font"], subs["vertical_font_size"],
-            subs["uppercase"], subs["max_words_per_card"],
-            bottom_margin_ratio=0.30,
-            title=clip.get("hook", "") if subs["show_title"] else "",
-        ) if subs["burn_in"] else _empty_ass(vert["width"], vert["height"])
-        ass_file = work / f"short_{i:02d}.ass"
-        ass_file.write_text(ass_text, encoding="utf-8")
-
-        music = pick_music() if music_cfg["enabled"] else None
-        dst = shorts_dir / f"short_{i:02d}.mp4"
-        render_vertical(str(tight), pieces, str(ass_file),
-                        str(dst), vert["width"], vert["height"], vert["background"],
-                        music, music_cfg["volume"], cfg["render"]["shorts_max_mbps"],
-                        title=clip["hook"] if show_title else "",
-                        font=subs["font"], work_dir=work)
-        _log(f"  готов {dst.name} ({_clip_duration(clip):.0f} с"
-             + (f", склейка из {len(pieces)} кусков" if len(pieces) > 1 else "")
-             + f", {dst.stat().st_size / 1024 / 1024:.0f} МБ)")
-        meta.append({
-            "file": f"shorts/{dst.name}",
+        entry = {
+            "file": f"shorts/short_{i:02d}.mp4",
             "pieces": pieces,
             "start_sec": pieces[0][0], "end_sec": pieces[-1][1],
             "hook": clip["hook"], "score": clip["score"],
-        })
+        }
+        dst = render_short(tight, transcript, entry, i, cfg, work, out_dir)
+        _log(f"  готов {dst.name} ({_clip_duration(clip):.0f} с"
+             + (f", склейка из {len(pieces)} кусков" if len(pieces) > 1 else "")
+             + f", {dst.stat().st_size / 1024 / 1024:.0f} МБ)")
+        meta.append(entry)
 
     # 6. Полная версия 16:9 для YouTube
     if cfg["render_youtube_version"]:

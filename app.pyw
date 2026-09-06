@@ -112,19 +112,22 @@ class App(tk.Tk):
 
         tab3 = ttk.Frame(nb)
         nb.add(tab3, text="  Готовые проекты  ")
-        ttk.Label(tab3, text="Поправить заголовки, которые придумала нейросеть,\n"
-                             "исправить ошибки распознавания или заново выбрать моменты."
+        ttk.Label(tab3, text="Поправить заголовки и субтитры, заново выбрать моменты, "
+                             "добавить диктора\nили описать словами, что изменить "
+                             "в конкретном ролике."
                   ).pack(anchor="w", padx=self.px(10), pady=self.px(8))
         row3 = ttk.Frame(tab3)
         row3.pack(fill="x", padx=self.px(10), pady=(self.px(0), self.px(6)))
+        ttk.Label(row3, text="Проект:").pack(side="left")
         self.project_var = tk.StringVar()
         self.project_combo = ttk.Combobox(row3, textvariable=self.project_var,
-                                          state="readonly", width=40)
-        self.project_combo.pack(side="left")
+                                          state="readonly", width=36)
+        self.project_combo.pack(side="left", padx=self.px(6))
+        self.project_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_shorts())
         ttk.Button(row3, text="Обновить список", command=self.refresh_projects
-                   ).pack(side="left", padx=self.px(6))
+                   ).pack(side="left")
         row3b = ttk.Frame(tab3)
-        row3b.pack(fill="x", padx=self.px(10), pady=(0, self.px(10)))
+        row3b.pack(fill="x", padx=self.px(10), pady=(0, self.px(6)))
         self.title_btn = ttk.Button(row3b, text="Заголовки роликов…",
                                     command=self.open_titles)
         self.title_btn.pack(side="left")
@@ -133,6 +136,23 @@ class App(tk.Tk):
         self.repick_btn = ttk.Button(row3b, text="Выбрать моменты заново",
                                      command=self.repick)
         self.repick_btn.pack(side="left")
+        # --- один ролик: диктор и правки словами ---
+        row3c = ttk.Frame(tab3)
+        row3c.pack(fill="x", padx=self.px(10), pady=(0, self.px(10)))
+        ttk.Label(row3c, text="Ролик:").pack(side="left")
+        self.short_var = tk.StringVar()
+        self._shorts: list[dict] = []
+        self.short_combo = ttk.Combobox(row3c, textvariable=self.short_var,
+                                        state="readonly", width=30)
+        self.short_combo.pack(side="left", padx=self.px(6))
+        self.narrator_btn = ttk.Button(row3c, text="Диктор…", command=self.open_narrator)
+        self.narrator_btn.pack(side="left")
+        self.fix_btn = ttk.Button(row3c, text="Правки словами…",
+                                  command=self.open_instructions)
+        self.fix_btn.pack(side="left", padx=self.px(6))
+        self.undo_btn = ttk.Button(row3c, text="Убрать диктора и правки",
+                                   command=self.undo_extras)
+        self.undo_btn.pack(side="left")
 
         # --- Статус и лог ---
         self.progress = ttk.Progressbar(self, mode="indeterminate")
@@ -207,7 +227,8 @@ class App(tk.Tk):
     def _set_busy_ui(self, busy: bool):
         state = "disabled" if busy else "normal"
         for btn in (self.video_btn, self.tts_btn, self.edit_btn,
-                    self.title_btn, self.repick_btn):
+                    self.title_btn, self.repick_btn,
+                    self.narrator_btn, self.fix_btn, self.undo_btn):
             btn.config(state=state)
         if busy:
             self.status_label.config(text="Работаю… ход обработки — в журнале ниже")
@@ -288,8 +309,31 @@ class App(tk.Tk):
         from pipeline.rerender import list_projects
         projects = list_projects()
         self.project_combo["values"] = projects
-        if projects and not self.project_var.get():
+        if projects and self.project_var.get() not in projects:
             self.project_var.set(projects[0])
+        elif not projects:
+            self.project_var.set("")
+        self.refresh_shorts()
+
+    def refresh_shorts(self):
+        """Список роликов выбранного проекта с пометками, что на них наложено."""
+        from pipeline.shorts import list_shorts
+        project = self.project_var.get()
+        self._shorts = list_shorts(project) if project else []
+        names = []
+        for s in self._shorts:
+            marks = []
+            if s["narration"]:
+                marks.append(f"диктор: {s['narration']}")
+            if s["edits"]:
+                marks.append(f"правок: {s['edits']}")
+            extra = f"  [{', '.join(marks)}]" if marks else ""
+            names.append(f"{s['index']:02d} — {s['hook'][:34]}{extra}")
+        self.short_combo["values"] = names
+        if names and self.short_var.get() not in names:
+            self.short_var.set(names[0])
+        elif not names:
+            self.short_var.set("")
 
     def _current_project(self) -> str | None:
         project = self.project_var.get()
@@ -297,6 +341,13 @@ class App(tk.Tk):
             messagebox.showwarning("Нет проекта", "Сначала выбери проект из списка.")
             return None
         return project
+
+    def _current_short(self) -> int | None:
+        sel = self.short_combo.current()
+        if sel < 0 or sel >= len(self._shorts):
+            messagebox.showwarning("Нет ролика", "Выбери ролик из списка.")
+            return None
+        return self._shorts[sel]["index"]
 
     def repick(self):
         project = self._current_project()
@@ -386,6 +437,273 @@ class App(tk.Tk):
 
         ttk.Button(win, text="Применить и перерендерить", command=apply
                    ).pack(anchor="e", padx=self.px(10), pady=self.px(8))
+
+    # ---------- вкладка 3: диктор ----------
+
+    @staticmethod
+    def _fmt_time(sec: float) -> str:
+        sec = float(sec)
+        return f"{int(sec // 60)}:{sec % 60:04.1f}"
+
+    @staticmethod
+    def _parse_lines(raw: str) -> list[dict]:
+        """Строки «м:сс.д | текст» или «секунды | текст» → реплики."""
+        import re
+        lines = []
+        for n, line in enumerate(raw.splitlines(), 1):
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r"^(?:(\d+):)?(\d+(?:[.,]\d+)?)\s*\|\s*(.+)$", line)
+            if not m:
+                raise ValueError(
+                    f"Строка {n} не разобрана: «{line[:40]}».\n"
+                    "Нужно так:  0:12.5 | что сказать")
+            minutes = int(m.group(1) or 0)
+            seconds = float(m.group(2).replace(",", "."))
+            lines.append({"start": minutes * 60 + seconds, "text": m.group(3).strip()})
+        return lines
+
+    def open_narrator(self):
+        project = self._current_project()
+        if not project:
+            return
+        index = self._current_short()
+        if not index:
+            return
+        from pipeline.shorts import current_narration, find_screen_text
+        narr = current_narration(project, index)
+
+        win = tk.Toplevel(self)
+        win.title(f"Диктор: {project}, ролик {index:02d}")
+        win.geometry(f"{self.px(720)}x{self.px(540)}")
+        ttk.Label(win, wraplength=self.px(680), justify="left",
+                  text="Диктор читает вслух текст, который появляется в кадре: реплики, "
+                       "сообщения, подписи. Нажми «Найти текст на экране» — программа "
+                       "просмотрит кадры и составит список. Одна строка — одна реплика: "
+                       "время | текст. Строки можно править, удалять и дописывать свои. "
+                       "Для озвучки нужен интернет: голоса живут у Microsoft."
+                  ).pack(anchor="w", padx=self.px(12), pady=(self.px(10), self.px(6)))
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=self.px(12), pady=self.px(2))
+        ttk.Label(row, text="Голос:").pack(side="left")
+        voice_var = tk.StringVar(value=next(
+            (k for k, v in VOICES.items() if v == narr.get("voice")), list(VOICES)[0]))
+        ttk.Combobox(row, textvariable=voice_var, values=list(VOICES),
+                     state="readonly", width=18).pack(side="left", padx=self.px(6))
+        duck_var = tk.BooleanVar(value=narr.get("duck", True))
+        ttk.Checkbutton(row, text="приглушать голос стримера под диктора",
+                        variable=duck_var).pack(side="left", padx=self.px(10))
+        scan_btn = ttk.Button(row, text="Найти текст на экране")
+        scan_btn.pack(side="right")
+        status = ttk.Label(win, text="", foreground="gray")
+        status.pack(anchor="w", padx=self.px(12))
+        editor = scrolledtext.ScrolledText(win, wrap="word", font=("Segoe UI", 10),
+                                           height=12)
+        editor.pack(fill="both", expand=True, padx=self.px(12), pady=self.px(4))
+        for line in narr.get("lines") or []:
+            editor.insert("end", f"{self._fmt_time(line['start'])} | {line['text']}\n")
+
+        def scan():
+            if self.busy:
+                messagebox.showwarning("Занято", "Дождись завершения текущей задачи.",
+                                       parent=win)
+                return
+            scan_btn.config(state="disabled")
+            status.config(text="Читаю кадры…")
+
+            def work():
+                try:
+                    found = find_screen_text(project, index)
+                except Exception as exc:
+                    self.after(0, lambda: messagebox.showerror("Не вышло", str(exc),
+                                                                parent=win))
+                    found = None
+                self.after(0, lambda: done(found))
+
+            def done(found):
+                scan_btn.config(state="normal")
+                if found is None:
+                    status.config(text="")
+                    return
+                if not found:
+                    status.config(text="Текста, похожего на сообщения, в кадре не нашлось. "
+                                       "Можно вписать реплики руками.")
+                    return
+                editor.delete("1.0", "end")
+                for m in found:
+                    editor.insert("end", f"{self._fmt_time(m['start'])} | {m['text']}\n")
+                status.config(text=f"Найдено реплик: {len(found)}. Проверь текст — "
+                                   "распознавание иногда путает буквы.")
+
+            threading.Thread(target=work, daemon=True).start()
+
+        scan_btn.config(command=scan)
+
+        def apply():
+            try:
+                lines = self._parse_lines(editor.get("1.0", "end"))
+            except ValueError as exc:
+                messagebox.showerror("Не разобрала строку", str(exc), parent=win)
+                return
+            if not lines:
+                messagebox.showwarning("Пусто", "Нет ни одной реплики.", parent=win)
+                return
+            from pipeline.shorts import set_narration
+            voice = VOICES[voice_var.get()]
+            duck = duck_var.get()
+            win.destroy()
+            self._run_in_thread(lambda: set_narration(project, index, lines, voice, duck),
+                                f"Диктор вшит в ролик {index:02d}")
+
+        def remove():
+            from pipeline.shorts import clear_narration
+            win.destroy()
+            self._run_in_thread(lambda: clear_narration(project, index),
+                                f"Диктор убран из ролика {index:02d}")
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=self.px(12), pady=self.px(8))
+        ttk.Button(btns, text="Озвучить и вшить в ролик", command=apply).pack(side="right")
+        if narr.get("lines"):
+            ttk.Button(btns, text="Убрать диктора", command=remove
+                       ).pack(side="left")
+
+    # ---------- вкладка 3: правки словами ----------
+
+    def open_instructions(self):
+        project = self._current_project()
+        if not project:
+            return
+        index = self._current_short()
+        if not index:
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Правки словами: {project}, ролик {index:02d}")
+        win.geometry(f"{self.px(700)}x{self.px(420)}")
+        ttk.Label(win, wraplength=self.px(660), justify="left",
+                  text="Напиши обычными словами, что изменить в ролике. Программа умеет: "
+                       "вырезать фрагмент («убери с 10 по 15 секунду», «удали кусок, где "
+                       "я говорю про кошку»), обрезать начало или конец, вставить картинку "
+                       "в начало, в конец или на нужную секунду, сделать анимацию в начале "
+                       "или в финале (заставка с надписью, наезд камеры, затемнение), "
+                       "написать текст на экране, дать диктору реплику, сменить заголовок.\n"
+                       "Сначала она покажет, как поняла просьбу, и применит только то, "
+                       "что ты подтвердишь."
+                  ).pack(anchor="w", padx=self.px(12), pady=(self.px(10), self.px(6)))
+        box = tk.Text(win, height=6, wrap="word", font=("Segoe UI", 10))
+        box.pack(fill="both", expand=True, padx=self.px(12), pady=self.px(4))
+        box.focus_set()
+        status = ttk.Label(win, text="", foreground="gray")
+        status.pack(anchor="w", padx=self.px(12))
+        go_btn = ttk.Button(win, text="Понять и показать план")
+        go_btn.pack(anchor="e", padx=self.px(12), pady=self.px(8))
+
+        def go():
+            request = box.get("1.0", "end").strip()
+            if not request:
+                messagebox.showwarning("Пусто", "Напиши, что поправить.", parent=win)
+                return
+            if self.busy:
+                messagebox.showwarning("Занято", "Дождись завершения текущей задачи.",
+                                       parent=win)
+                return
+            go_btn.config(state="disabled")
+            status.config(text="Нейросеть разбирает просьбу…")
+
+            def work():
+                try:
+                    from pipeline.shorts import describe_request
+                    result = describe_request(project, index, request)
+                except Exception as exc:
+                    self.after(0, lambda: messagebox.showerror("Не вышло", str(exc),
+                                                                parent=win))
+                    result = None
+                self.after(0, lambda: show_plan(result))
+
+            def show_plan(result):
+                go_btn.config(state="normal")
+                status.config(text="")
+                if result is None:
+                    return
+                if not result["ops"]:
+                    from pipeline.instructions import plan_text
+                    messagebox.showinfo("Не поняла",
+                                        "Из этой просьбы не получилось ни одной правки.\n\n"
+                                        + plan_text(result), parent=win)
+                    return
+                win.destroy()
+                self._confirm_plan(project, index, result)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        go_btn.config(command=go)
+
+    def _confirm_plan(self, project: str, index: int, result: dict):
+        """Показывает, как нейросеть поняла просьбу; каждую правку можно снять."""
+        from pipeline.edits import describe
+        win = tk.Toplevel(self)
+        win.title("Так поняла — применить?")
+        win.geometry(f"{self.px(620)}x{self.px(160 + 34 * len(result['ops']))}")
+        ttk.Label(win, text="Сними галочку с того, что поняла неверно:",
+                  ).pack(anchor="w", padx=self.px(12), pady=(self.px(10), self.px(4)))
+        checks = []
+        for op in result["ops"]:
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(win, text=describe(op), variable=var
+                            ).pack(anchor="w", padx=self.px(20), pady=self.px(2))
+            checks.append(var)
+        notes = []
+        if result.get("unclear"):
+            notes.append("Не поняла: " + result["unclear"])
+        if result.get("problems"):
+            notes.append("Пропущено: " + "; ".join(result["problems"]))
+        if notes:
+            ttk.Label(win, text="\n".join(notes), wraplength=self.px(580),
+                      justify="left", foreground="darkorange"
+                      ).pack(anchor="w", padx=self.px(12), pady=self.px(4))
+
+        def apply():
+            ops = [op for op, var in zip(result["ops"], checks) if var.get()]
+            if not ops:
+                win.destroy()
+                return
+            for op in ops:
+                if op["op"] == "image" and not op.get("file"):
+                    path = filedialog.askopenfilename(
+                        title="Выбери картинку", parent=win,
+                        filetypes=[("Картинки", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                                   ("Все файлы", "*.*")])
+                    if not path:
+                        return
+                    op["file"] = path
+            win.destroy()
+            from pipeline.shorts import add_edits
+            self._run_in_thread(lambda: add_edits(project, index, ops),
+                                f"Правки применены к ролику {index:02d}")
+
+        btns = ttk.Frame(win)
+        btns.pack(side="bottom", fill="x", padx=self.px(12), pady=self.px(10))
+        ttk.Button(btns, text="Применить", command=apply).pack(side="right")
+        ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right",
+                                                                   padx=self.px(6))
+
+    def undo_extras(self):
+        project = self._current_project()
+        if not project:
+            return
+        index = self._current_short()
+        if not index:
+            return
+        if not messagebox.askyesno(
+                "Убрать диктора и правки",
+                f"Ролик {index:02d} вернётся к тому виду, каким его собрала программа: "
+                "без диктора, вставок и заставок.\n\nПродолжить?"):
+            return
+        from pipeline.shorts import clear_edits
+        self._run_in_thread(lambda: clear_edits(project, index),
+                            f"Ролик {index:02d} возвращён к чистому рендеру")
 
     # ---------- журнал и статус ----------
 

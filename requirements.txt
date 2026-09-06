@@ -1,2 +1,11 @@
 faster-whisper>=1.2
 edge-tts>=7.0
+# Чтение текста с экрана для диктора: встроенный в Windows OCR через WinRT
+winrt-runtime>=3.2
+winrt-Windows.Foundation>=3.2
+winrt-Windows.Foundation.Collections>=3.2
+winrt-Windows.Globalization>=3.2
+winrt-Windows.Graphics.Imaging>=3.2
+winrt-Windows.Media.Ocr>=3.2
+winrt-Windows.Storage>=3.2
+winrt-Windows.Storage.Streams>=3.2
