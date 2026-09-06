@@ -13,7 +13,7 @@ from .ffmpeg_utils import ffmpeg, run, duration_of, video_encoder_args
 from .tts import _synth_async
 
 GAP_SEC = 0.25        # пауза между репликами, если они наезжают друг на друга
-MAX_EXTEND_SEC = 6.0  # насколько можно продлить ролик ради последней реплики
+MAX_EXTEND_SEC = 20.0  # насколько можно продлить ролик стоп-кадром ради последних реплик
 VOLUME = 1.0
 
 
@@ -106,6 +106,12 @@ def mix_into(video: str | Path, lines: list[dict], dst: str | Path,
     last_end = max(float(l["start"]) + float(l["dur"]) for l in lines)
     extend = min(max(last_end + 0.4 - video_dur, 0.0), MAX_EXTEND_SEC)
     total = video_dur + extend
+    # реплики, которые не влезли даже в продлённый ролик, лучше не начинать,
+    # чем оборвать на полуслове
+    fit = [l for l in lines if float(l["start"]) + 1.0 <= total]
+    if len(fit) < len(lines):
+        print(f"  диктор: {len(lines) - len(fit)} реплик не влезли в ролик и пропущены")
+    lines = fit or lines[:1]
 
     cmd = [ffmpeg(), "-y", "-i", str(video)]
     delays = []
